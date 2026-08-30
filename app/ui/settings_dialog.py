@@ -226,17 +226,18 @@ class SettingsDialog(OverlayDialog):
         self._pending_ui_scale = self._original_ui_scale
         # 可编辑下拉：预设档位 + 直接键入任意百分比（无级调整，50-200）
         scale_labels = [f"{round(s * 100):d}%" for s in sorted(settings_store.UI_SCALES)]
-        current_pct = f"{round(self._pending_ui_scale * 100):d}%"
+        current_pct = f"{round(self._pending_ui_scale * 100):g}%"
         self._scale_combo = themed_combo(scale_labels, current=current_pct, editable=True)
-        # 输入校验：仅允许 50-200 的小数
-        from PySide6.QtGui import QDoubleValidator
-        if self._scale_combo.lineEdit() is not None:
-            self._scale_combo.lineEdit().setValidator(
-                QDoubleValidator(50.0, 200.0, 1, self._scale_combo))
-        # 键入完成（回车/失焦）与选择档位都触发解析
+        # 输入校验：不设 validator——任何 validator 都会在校验中间态时
+        # 干扰增量输入（QDoubleValidator 范围校验拒绝"1"、"12"这类中间值，
+        # 正是「打字没反应」的根因）。输入完全自由，非法值在提交时
+        # _on_scale_edited 用 float() 解析并回显兜底。
+        # 聚焦自动全选已由 themed_combo 内部 _SelectAllLineEdit 处理。
+        # 回车/失焦提交解析；选档位用 activated（仅用户从弹出列表点选时
+        # 触发，不会因输入过程中 currentText 变化而误触发覆盖输入）
         self._scale_combo.lineEdit().returnPressed.connect(self._on_scale_edited)
         self._scale_combo.lineEdit().editingFinished.connect(self._on_scale_edited)
-        self._scale_combo.currentTextChanged.connect(self._on_scale_selected)
+        self._scale_combo.activated.connect(self._on_scale_selected)
         scale_row.addWidget(self._scale_combo)
 
         # ── 小爱同学悬浮对话按钮 ──
@@ -468,16 +469,21 @@ class SettingsDialog(OverlayDialog):
         if hasattr(win, "apply_theme_mode"):
             win.apply_theme_mode(mode)
 
-    def _on_scale_selected(self, text: str) -> None:
-        """可编辑下拉文本变化：解析百分比（选档位或键入都走这里）。"""
+    def _on_scale_selected(self, index: int) -> None:
+        """用户从下拉点选预设档位（activated 信号）：更新值并回显。"""
+        combo = self._scale_combo
+        if index < 0 or index >= combo.count():
+            return
+        text = combo.itemText(index)
         try:
-            raw = text.strip().rstrip("%")
-            if not raw:
-                return
-            value = float(raw) / 100.0
+            value = float(text.strip().rstrip("%")) / 100.0
         except ValueError:
             return
         self._pending_ui_scale = value
+        # blockSignals：避免 setCurrentText 再触发信号递归
+        combo.blockSignals(True)
+        combo.setCurrentText(self._scale_pct_text(value))
+        combo.blockSignals(False)
 
     def _scale_pct_text(self, value: float) -> str:
         """缩放值(小数) → 百分比显示文本，保留小数但去尾零（137.5→137.5%, 1.0→100%）。"""

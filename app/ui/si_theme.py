@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QSizePolicy
+from PySide6.QtWidgets import QLineEdit, QSizePolicy
 
 from app.siui.components.button import SiSwitchRefactor, SiToggleButtonRefactor
 
@@ -507,6 +507,22 @@ def themed_tab_button(text: str) -> SiToggleButtonRefactor:
     return button
 
 
+class _SelectAllLineEdit(QLineEdit):
+    """editable 下拉的输入框：聚焦/点击时自动全选。
+
+    用户点进输入框直接输入新数字即整体替换（否则光标在末尾，
+    输入会追加到 "100" 后变 "1001"）。
+    """
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        self.selectAll()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        super().mousePressEvent(event)
+        self.selectAll()
+
+
 def themed_combo(options: list[str], current: str = "",
                  editable: bool = False) -> "QComboBox":
     """设置页等处的下拉选择器：原生 QComboBox + 主题化样式。
@@ -549,6 +565,12 @@ def themed_combo(options: list[str], current: str = "",
         combo.setEditable(True)
         # 键入文本不进列表，档位保持预设干净；回车/失焦提交由调用方处理
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        # 替换输入框为自动全选版：聚焦/点击即全选，直接输入整体替换
+        combo.setLineEdit(_SelectAllLineEdit(combo))
+        # 关键：移除 completer 关闭自动补全——否则输入 "12" 会被自动匹配
+        # 替换成列表里的 "125%" 之类（用户反馈「输 2 变 75」即此）。
+        # 必须在 setLineEdit 之后：setLineEdit 会重置 completer。
+        combo.setCompleter(None)
         combo.setCurrentText(current)
     elif current and current in options:
         combo.setCurrentText(current)
