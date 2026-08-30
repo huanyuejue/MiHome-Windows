@@ -3,7 +3,7 @@
 # Copyright (C) 2026 MiHome-Windows contributors
 """设置窗口：无边框可拖拽面板 + 背部暗色遮罩，与设备详情页同款观感。"""
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QRegularExpression, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
@@ -134,28 +134,32 @@ class SettingsDialog(OverlayDialog):
         scale_texts.addWidget(self._scale_label)
         self._scale_desc = QLabel(
             "调整界面整体元素大小（在系统缩放之上叠加），适用于高 DPI 屏幕使用"
-            "较高系统缩放时觉得界面偏大的情况；可从下拉选档位或直接键入任意"
-            "百分比，更改后需重启应用生效")
+            "较高系统缩放时觉得界面偏大的情况；可直接在框内输入任意百分比或从"
+            "下拉选择档位，更改后需重启应用生效")
         self._scale_desc.setWordWrap(True)
         self._scale_desc.setAlignment(Qt.AlignmentFlag.AlignLeft)
         scale_texts.addWidget(self._scale_desc)
         scale_lay.addLayout(scale_texts, stretch=1)
         self._original_ui_scale = settings_store.get_ui_scale()
         self._pending_ui_scale = self._original_ui_scale
-        # 可编辑下拉：预设档位 + 直接键入任意百分比（无级调整，50-200）
+        # 可编辑下拉：输入与档位选择合一（themed_combo 已关闭自动补全，
+        # 输入全程自由不会被匹配替换）；输入时是纯数字，回车/失焦自动补 %
         scale_labels = [f"{round(s * 100):d}%" for s in sorted(settings_store.UI_SCALES)]
-        current_pct = f"{round(self._pending_ui_scale * 100):d}%"
+        current_pct = f"{self._pending_ui_scale * 100:g}%"
         self._scale_combo = themed_combo(
             scale_labels, current=current_pct, editable=True)
-        # 输入校验：仅允许 50-200 的小数
-        from PySide6.QtGui import QDoubleValidator
+        # 输入校验：允许数字+一位小数，不做范围/补全（提交时才钳制）
+        from PySide6.QtGui import QRegularExpressionValidator
         if self._scale_combo.lineEdit() is not None:
             self._scale_combo.lineEdit().setValidator(
-                QDoubleValidator(50.0, 200.0, 1, self._scale_combo))
-        # 键入完成（回车/失焦）与选择档位都触发解析
+                QRegularExpressionValidator(
+                    QRegularExpression(r"^\d{0,3}(\.\d{0,1})?%?$"),
+                    self._scale_combo))
+        # 回车/失焦提交解析；选档位用 activated（仅用户从弹出列表选择时
+        # 触发，不会因输入过程中 currentText 变化而误触发覆盖输入）
         self._scale_combo.lineEdit().returnPressed.connect(self._on_scale_edited)
         self._scale_combo.lineEdit().editingFinished.connect(self._on_scale_edited)
-        self._scale_combo.currentTextChanged.connect(self._on_scale_selected)
+        self._scale_combo.activated.connect(self._on_scale_selected)
         scale_lay.addWidget(self._scale_combo)
         body.addWidget(self._scale_item)
 
@@ -377,7 +381,8 @@ class SettingsDialog(OverlayDialog):
             f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}")
         apply_combo_qss(self._theme_combo)
         self._theme_combo.set_arrow_color(SiColors.TEXT_SECONDARY)
-        # 界面缩放下拉同样随主题刷新（遗漏曾致切主题后仍保持旧深色样式）
+        # 界面缩放下拉同样随主题刷新（遗漏曾致切主题后仍保持旧深色样式）；
+        # editable 模式需保留下拉点击区（否则点不开）
         apply_combo_qss(self._scale_combo, editable=True)
         self._scale_combo.set_arrow_color(SiColors.TEXT_SECONDARY)
 
@@ -416,23 +421,24 @@ class SettingsDialog(OverlayDialog):
         if hasattr(win, "apply_theme_mode"):
             win.apply_theme_mode(mode)
 
-    def _on_scale_selected(self, text: str) -> None:
-        """可编辑下拉文本变化：解析百分比（选档位或键入都走这里）。"""
+    def _on_scale_selected(self, index: int) -> None:
+        """用户从下拉点选预设档位（activated 信号）：更新值并回显。"""
+        combo = self._scale_combo
+        if index < 0 or index >= combo.count():
+            return
+        text = combo.itemText(index)
         try:
-            raw = text.strip().rstrip("%")
-            if not raw:
-                return
-            value = float(raw) / 100.0
+            value = float(text.strip().rstrip("%")) / 100.0
         except ValueError:
             return
         self._pending_ui_scale = value
-
-    def _scale_pct_text(self, value: float) -> str:
-        """缩放值(小数) → 百分比显示文本，保留小数但去尾零（137.5→137.5%, 1.0→100%）。"""
-        return f"{value * 100:g}%"
+        # blockSignals：避免 setCurrentText 再触发信号递归
+        combo.blockSignals(True)
+        combo.setCurrentText(f"{value * 100:g}%")
+        combo.blockSignals(False)
 
     def _on_scale_edited(self) -> None:
-        """键入完成后规范化显示：非法值回显、超范围钳制。"""
+        """回车/失焦：解析输入（没输 % 自动补）+ 钳制范围 + 规范化回显。"""
         combo = self._scale_combo
         raw = combo.currentText().strip().rstrip("%")
         if not raw:
@@ -442,21 +448,16 @@ class SettingsDialog(OverlayDialog):
         except ValueError:
             # 非法输入回显当前值
             combo.blockSignals(True)
-            combo.setCurrentText(self._scale_pct_text(self._pending_ui_scale))
+            combo.setCurrentText(f"{self._pending_ui_scale * 100:g}%")
             combo.blockSignals(False)
             return
         # 钳制到允许范围（设置页 50%-200%；超出按边界）
         low, high = settings_store._UI_SCALE_MIN, settings_store._UI_SCALE_MAX
         value = min(max(value, low), high)
-        # 值未变（如回显规范化）直接返回，避免 setCurrentText 递归
-        if abs(value - self._pending_ui_scale) < 1e-9 and \
-                combo.currentText() == self._scale_pct_text(value):
-            return
         self._pending_ui_scale = value
-        # 回显规范化文本；blockSignals 避免 setCurrentText 再触发
-        # _on_scale_selected 用舍入值覆盖刚保存的精确值（如 137.5→138）
+        # 回显规范化（自动补 %，保留小数去尾零如 137.5%）
         combo.blockSignals(True)
-        combo.setCurrentText(self._scale_pct_text(value))
+        combo.setCurrentText(f"{value * 100:g}%")
         combo.blockSignals(False)
 
     def _save_and_accept(self) -> None:

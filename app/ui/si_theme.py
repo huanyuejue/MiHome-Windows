@@ -549,6 +549,9 @@ def themed_combo(options: list[str], current: str = "",
         combo.setEditable(True)
         # 键入文本不进列表，档位保持预设干净；回车/失焦提交由调用方处理
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        # 关键：移除 completer 关闭自动补全——否则输入 "12" 会被自动匹配
+        # 替换成列表里的 "125%" 之类（用户反馈「输 2 变 75」即此）
+        combo.setCompleter(None)
         combo.setCurrentText(current)
     elif current and current in options:
         combo.setCurrentText(current)
