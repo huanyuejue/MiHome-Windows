@@ -24,6 +24,7 @@ _DEFAULTS: dict = {
     "hide_no_func_devices": False,
     "default_speaker_did": "",  # 小爱指令默认输出音箱；空串=自动（第一个在线）
     "ui_scale": 1.0,    # 界面缩放个人微调乘数（叠加在软件基准缩放之上），需重启生效
+    "tray_columns": 2,  # 托盘快捷窗口卡片列数：1 或 2
 }
 
 
@@ -97,6 +98,21 @@ def get_hide_no_func_devices() -> bool:
 def set_hide_no_func_devices(value: bool) -> None:
     raw = _read_raw()
     raw["hide_no_func_devices"] = bool(value)
+    _write_raw(raw)
+
+
+def get_tray_columns() -> int:
+    """托盘快捷窗口卡片列数，仅认 1 / 2，其余值回退双列。"""
+    try:
+        value = int(_read_raw().get("tray_columns", 2))
+    except (TypeError, ValueError):
+        return 2
+    return value if value in (1, 2) else 2
+
+
+def set_tray_columns(value: int) -> None:
+    raw = _read_raw()
+    raw["tray_columns"] = int(value) if int(value) in (1, 2) else 2
     _write_raw(raw)
 
 

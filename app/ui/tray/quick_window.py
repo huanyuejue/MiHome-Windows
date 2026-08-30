@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QFont, QFontMetrics
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -40,34 +40,6 @@ from app.ui.tray.audio_bar import _TrayAudioBar
 from app.ui.typewriter import TypewriterPlaceholder
 
 
-class _ElideLabel(QLabel):
-    """自动省略号截断的标签：文本过长时按可用宽度省略号收尾。
-
-    托盘设备行右侧有电源按钮，若设备名很长且 QLabel 按完整文本
-    强占最小宽度，会把电源按钮挤出窗口（行右半边被截断）。此处
-    让标签可被压缩，超宽部分绘制为省略号，按钮始终完整可见。
-    """
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(text, parent)
-        # 允许水平压缩（忽略 sizeHint 的完整文本宽），超宽走 paintEvent 省略
-        from PySide6.QtWidgets import QSizePolicy
-        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-
-    def paintEvent(self, event):  # noqa: N802 (Qt 命名约定)
-        from PySide6.QtGui import QPainter
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        color = self.palette().color(self.foregroundRole())
-        p.setPen(color)
-        p.setFont(self.font())
-        rect = self.rect().adjusted(0, 0, 0, 0)
-        elided = p.fontMetrics().elidedText(
-            self.text(), Qt.TextElideMode.ElideRight, rect.width())
-        p.drawText(rect, self.alignment() | Qt.AlignmentFlag.AlignVCenter, elided)
-        p.end()
-
-
 class TrayQuickWindow(QDialog):
     """托盘左键弹出的快捷操作面板。"""
 
@@ -83,6 +55,8 @@ class TrayQuickWindow(QDialog):
         self._known_power: dict[str, bool | None] = {}
         self._metrics: dict[str, str | None] = {}
         self._sub_labels: dict[str, QLabel] = {}
+        self._sub_widths: dict[str, int] = {}
+        self._columns: int = settings_store.get_tray_columns()
 
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -122,6 +96,19 @@ class TrayQuickWindow(QDialog):
         home_btn.setDefault(False)
         home_btn.clicked.connect(self._open_main)
         header.addWidget(home_btn)
+        # 单双列切换（放在打开主窗口右边）：图标表示当前列数，点击切换
+        self._cols_btn = QPushButton()
+        self._cols_btn.setFixedSize(22, 22)
+        self._cols_btn.setCursor(Qt.PointingHandCursor)
+        self._cols_btn.setIconSize(QSize(16, 16))
+        self._cols_btn.setStyleSheet(
+            f"QPushButton {{ background: {SiColors.SURFACE}; border: none; border-radius: 11px; }}"
+            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}")
+        self._cols_btn.setAutoDefault(False)
+        self._cols_btn.setDefault(False)
+        self._cols_btn.clicked.connect(self._toggle_columns)
+        self._refresh_cols_btn()
+        header.addWidget(self._cols_btn)
         # 管理（加号线性图标）— 缩小
         add_btn = QPushButton()
         add_btn.setFixedSize(22, 22)
@@ -152,10 +139,13 @@ class TrayQuickWindow(QDialog):
         header.addWidget(close)
         lay.addLayout(header)
 
-        # 滚动列表：单列垂直排布（每行占满宽度），高度随设备数动态
+        # 滚动列表：列数可切换（1/2），可见行数固定 4 行
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.NoFrame)
+        # 固定高度：可见 4 排卡片（56×4 + 间距6×3），单双列共用同一行高；
+        # 窗口按上下栏显隐外扩
+        self._scroll.setFixedHeight(4 * 56 + 3 * 6)
         self._scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
             "QScrollBar:vertical { background: transparent; width: 6px; margin: 0 2px 0 0; }"
@@ -243,6 +233,21 @@ class TrayQuickWindow(QDialog):
         self.hide_animated()
         self.open_main_requested.emit()
 
+    def _refresh_cols_btn(self) -> None:
+        """图标与提示跟随当前列数：view-stream（横条堆叠）为单列，view-grid 为双列。"""
+        if self._columns == 1:
+            icon_name, tip = "mdi.view-stream-outline", "单列显示，点击切换双列"
+        else:
+            icon_name, tip = "mdi.view-grid-outline", "双列显示，点击切换单列"
+        self._cols_btn.setIcon(qta.icon(icon_name, color=SiColors.TEXT_PRIMARY))
+        self._cols_btn.setToolTip(tip)
+
+    def _toggle_columns(self) -> None:
+        self._columns = 1 if self._columns == 2 else 2
+        settings_store.set_tray_columns(self._columns)
+        self._refresh_cols_btn()
+        self._rebuild()
+
     def set_devices(self, devices: list[DeviceInfo], known_power: dict[str, bool | None]) -> None:
         """由主窗口在设备列表刷新后调用，传入全量设备与开关记忆。"""
         self._devices = list(devices)
@@ -265,7 +270,7 @@ class TrayQuickWindow(QDialog):
             return
         for did, text in metrics.items():
             sub = self._sub_labels.get(did)
-            if sub is None:
+            if sub is None or not shiboken6.isValid(sub):
                 continue
             dev = next((d for d in self._devices if d.did == did), None)
             if dev is None:
@@ -274,7 +279,7 @@ class TrayQuickWindow(QDialog):
                 sub_text = f"{dev.room_name} | {text}" if text else dev.room_name
             else:
                 sub_text = f"{dev.room_name} · 离线"
-            sub.setText(sub_text)
+            self._set_elided(sub, sub_text, self._sub_widths.get(did))
 
     def _update_voice_bar(self) -> None:
         has_speaker = any(is_speaker(d) and d.online for d in self._devices)
@@ -311,25 +316,14 @@ class TrayQuickWindow(QDialog):
     def _sync_tray_height(self) -> None:
         # 确定性计算窗口高度，不依赖 adjustSize（隐藏态会漏算语音条/音频栏）：
         # 由各固定子控件高度累加，显隐结果一致，呼出前即可得到正确尺寸避免闪烁；
-        # 已显示时外扩并保持底部贴边，避免语音/音频栏显隐挤压卡片。
-        # 滚动区高度随设备数动态：单列每行 56 + 间距 6，上限约 4 行交给内部滚动。
-        n_devices = len([d for d in getattr(self, "_tray_dids", [])
-                         if d in {x.did for x in self._devices}])
-        if n_devices > 0 and not self._scroll.isHidden():
-            scroll_h = min(n_devices, 4) * 56 + max(0, min(n_devices, 4) - 1) * 6
-            if abs(scroll_h - self._scroll.height()) >= 2:
-                self._scroll.setFixedHeight(scroll_h)
-        else:
-            scroll_h = 56
-            if self._scroll.height() != scroll_h:
-                self._scroll.setFixedHeight(scroll_h)
+        # 已显示时外扩并保持底部贴边，避免语音/音频栏显隐挤压卡片
         audio_h = 0
         if not self._audio_bar.isHidden():
             ah = self._audio_bar.sizeHint().height()
             audio_h = (ah if ah > 0 else 105) + 8  # 外层 spacing
         voice_h = 36 + 10 if not self._voice_frame.isHidden() else 0  # 36 + 间距10
-        # 根面板：标题 26 + 滚动区 scroll_h + 上间距10 + 下间距10 + 内容边距 24
-        root_h = 26 + scroll_h + 24 + 20
+        # 根面板：标题 26 + 滚动区 242 + 上间距10 + 下间距10 + 内容边距 24
+        root_h = 26 + 242 + 24 + 20
         h = audio_h + root_h + voice_h
         from PySide6.QtGui import QGuiApplication
         screen = QGuiApplication.primaryScreen()
@@ -483,45 +477,30 @@ class TrayQuickWindow(QDialog):
         dids = getattr(self, "_tray_dids", None)
         if dids is None:
             dids = self._tray_dids = tray_store.load()
-        lookup = {d.did: d for d in self._devices}
-        cards = [lookup[d] for d in dids if lookup.get(d)]
-        if not cards:
-            # 空列表，或保存的 did 在主列表中已全部失效：统一显示空态
+        if not dids:
             self._empty.show()
             self._scroll.hide()
-            self._sync_tray_height()
             return
         self._empty.hide()
         self._scroll.show()
-        # 单列布局：每行占满可用宽度，行数即设备数。两列布局在托盘
-        # 窗口宽度内每卡只有约半宽，长设备名 + 电源按钮会被挤出行外
-        # （行右半边被截断），单列从根上避免。
+        lookup = {d.did: d for d in self._devices}
+        cards = [lookup[d] for d in dids if lookup.get(d)]
+        # 使用 QGridLayout + setColumnStretch 强制各列等宽，单卡也能保持列宽
+        cols = self._columns
         self._grid = QGridLayout()
         self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setColumnStretch(0, 1)
-        self._grid.setHorizontalSpacing(0)
+        for c in range(cols):
+            self._grid.setColumnStretch(c, 1)
+        self._grid.setHorizontalSpacing(6)
         self._grid.setVerticalSpacing(6)
-        # 按最长设备名的实际文本宽度估算窗口宽度，让名字尽量完整显示
-        name_font = QFont("Microsoft YaHei UI", 10, QFont.Weight.DemiBold)
-        fm = QFontMetrics(name_font)
-        max_text_w = max((fm.horizontalAdvance(d.name) for d in cards), default=0)
         for idx, dev in enumerate(cards):
             row = self._make_row(dev)
-            self._grid.addWidget(row, idx, 0)
+            self._grid.addWidget(row, idx // cols, idx % cols)
         self._list_lay.addLayout(self._grid)
         self._list_lay.addStretch(1)
         online_dids = [d for d in dids if lookup.get(d) and lookup[d].online and self._known_power.get(d) is None]
         if online_dids:
             self.refresh_power(online_dids)
-        # 滚动区高度随设备数动态（单列：行高 56 + 间距 6），超出上限交给滚动
-        self._sync_tray_height()
-        # 窗口宽度自适应内容：最长的设备名 + 电源按钮 + 边距，
-        # 不因固定 300 宽度把行右半边截断（含 DPI 缩放下的物理像素）
-        if max_text_w > 0:
-            need = max_text_w + 12 + 10 + 28 + 12 + 14 + 14 + 20
-            need = max(need, 280)  # 不低于原最小宽度
-            if self.width() < need:
-                self.resize(need, self.height())
 
     def _destroy_grid(self) -> None:
         grid = getattr(self, "_grid", None)
@@ -540,12 +519,36 @@ class TrayQuickWindow(QDialog):
                 w.deleteLater()
         grid.deleteLater()
         self._grid = None
+        self._sub_labels.clear()
+        self._sub_widths.clear()
         # 移除多余的 stretch
         for i in range(self._list_lay.count() - 1, -1, -1):
             item = self._list_lay.itemAt(i)
             if item and item.spacerItem():
                 self._list_lay.takeAt(i)
                 break
+
+    def _card_text_width(self, has_power: bool) -> int:
+        """卡片文本列的可用宽度（窗口宽固定，各边距确定，可直接算出）。
+
+        卡片内文本不省略时 QLabel 最小宽取整段文本，温湿度+开关会把
+        列宽撑爆、整个网格溢出面板；所有文本都按此宽度省略兜底。
+        """
+        # 根面板左右边距 28 + 列表右边距 6 + 列间距 6×(cols-1)
+        inner = self.width() - 40 - 6 * (self._columns - 1)
+        col = inner / self._columns
+        # 卡片左右边距 24 + 文本列与开关间距 10 + 开关按钮 28
+        return max(36, round(col - 24 - 10 - (28 if has_power else 0)))
+
+    @staticmethod
+    def _set_elided(label: QLabel, text: str, width: int | None) -> None:
+        """按可用宽度省略显示文本，完整内容放 tooltip。"""
+        if width is None:
+            label.setText(text)
+        else:
+            label.setText(label.fontMetrics().elidedText(
+                text, Qt.ElideRight, width))
+        label.setToolTip(text)
 
     def _make_row(self, dev: DeviceInfo) -> QFrame:
         row = QFrame()
@@ -561,25 +564,37 @@ class TrayQuickWindow(QDialog):
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(10)
 
+        known = self._known_power.get(dev.did)
+        avail = self._card_text_width(known is not None)
+
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
-        name = _ElideLabel(dev.name, self)
+        name = QLabel()
         name.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.DemiBold))
         name.setStyleSheet(f"color: {SiColors.TEXT_PRIMARY if dev.online else f'{SiColors.OFFLINE_TEXT}'}; background: transparent;")
+        # 水平 Ignored：布局可无限压缩标签，文本绝不可能把列撑宽
+        # （setMinimumWidth(0) 无效——qSmartMinSize 只认 >0 的显式最小宽）
+        name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._set_elided(name, dev.name, avail)
         # 副标题：在线仅显示房间（+温湿度），离线才追加“· 离线”
         metrics = self._metrics.get(dev.did)
         if dev.online:
             sub_text = f"{dev.room_name} | {metrics}" if metrics else dev.room_name
         else:
             sub_text = f"{dev.room_name} · 离线"
-        sub = _ElideLabel(sub_text, self)
-        self._sub_labels[dev.did] = sub
+        sub = QLabel()
+        # setFont 提供与渲染一致的 fontMetrics；但应用级 QSS `*{font-size:10pt}`
+        # 会盖掉 setFont，故样式表里也要写 8pt，两者缺一度量与渲染就不一致
+        sub.setFont(QFont("Microsoft YaHei UI", 8))
         sub.setStyleSheet(f"color: {SiColors.TEXT_SECONDARY if dev.online else f'{SiColors.OFFLINE_SUB}'}; background: transparent; font-size: 8pt;")
+        sub.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._set_elided(sub, sub_text, avail)
+        self._sub_labels[dev.did] = sub
+        self._sub_widths[dev.did] = avail
         text_col.addWidget(name)
         text_col.addWidget(sub)
         lay.addLayout(text_col, stretch=1)
 
-        known = self._known_power.get(dev.did)
         btn = None
         if known is not None:
             btn = PowerButton(28, icon_size=22)
