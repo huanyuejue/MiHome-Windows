@@ -134,18 +134,27 @@ class SettingsDialog(OverlayDialog):
         scale_texts.addWidget(self._scale_label)
         self._scale_desc = QLabel(
             "调整界面整体元素大小（在系统缩放之上叠加），适用于高 DPI 屏幕使用"
-            "较高系统缩放时觉得界面偏大的情况；更改后需重启应用生效")
+            "较高系统缩放时觉得界面偏大的情况；可从下拉选档位或直接键入任意"
+            "百分比，更改后需重启应用生效")
         self._scale_desc.setWordWrap(True)
         self._scale_desc.setAlignment(Qt.AlignmentFlag.AlignLeft)
         scale_texts.addWidget(self._scale_desc)
         scale_lay.addLayout(scale_texts, stretch=1)
         self._original_ui_scale = settings_store.get_ui_scale()
         self._pending_ui_scale = self._original_ui_scale
-        scale_labels = {f"{s:g}": f"{round(s * 100):d}%" for s in settings_store.UI_SCALES}
-        scale_key = min(scale_labels, key=lambda k: abs(float(k) - self._pending_ui_scale))
+        # 可编辑下拉：预设档位 + 直接键入任意百分比（无级调整，50-200）
+        scale_labels = [f"{round(s * 100):d}%" for s in sorted(settings_store.UI_SCALES)]
+        current_pct = f"{round(self._pending_ui_scale * 100):d}%"
         self._scale_combo = themed_combo(
-            [scale_labels[k] for k in sorted(scale_labels, key=float)],
-            current=scale_labels[scale_key])
+            scale_labels, current=current_pct, editable=True)
+        # 输入校验：仅允许 50-200 的小数
+        from PySide6.QtGui import QDoubleValidator
+        if self._scale_combo.lineEdit() is not None:
+            self._scale_combo.lineEdit().setValidator(
+                QDoubleValidator(50.0, 200.0, 1, self._scale_combo))
+        # 键入完成（回车/失焦）与选择档位都触发解析
+        self._scale_combo.lineEdit().returnPressed.connect(self._on_scale_edited)
+        self._scale_combo.lineEdit().editingFinished.connect(self._on_scale_edited)
         self._scale_combo.currentTextChanged.connect(self._on_scale_selected)
         scale_lay.addWidget(self._scale_combo)
         body.addWidget(self._scale_item)
@@ -346,9 +355,10 @@ class SettingsDialog(OverlayDialog):
                      self._theme_item, self._autostart_item, self._speaker_item,
                      self._hide_item, self._scale_item):
             item.setStyleSheet(panel_card)
-            # 全部设置项等高：滚动区内布局按 sizeHint 分配，固定高度
-            # 保证文字不被压缩裁切、视觉整齐
-            item.setFixedHeight(64)
+            # 高度按内容自适应（不固定）：长描述换行后行自然变高，
+            # 不会被固定 64px 裁掉；短描述保持紧凑。QScrollArea 负责
+            # 项数多/高缩放时的整体滚动。
+            item.setMinimumHeight(0)
         self._title_label.setStyleSheet(
             f"color: {SiColors.TEXT_PRIMARY}; background: transparent;")
         for label in (self._tray_label, self._start_min_label, self._fab_label,
@@ -368,7 +378,7 @@ class SettingsDialog(OverlayDialog):
         apply_combo_qss(self._theme_combo)
         self._theme_combo.set_arrow_color(SiColors.TEXT_SECONDARY)
         # 界面缩放下拉同样随主题刷新（遗漏曾致切主题后仍保持旧深色样式）
-        apply_combo_qss(self._scale_combo)
+        apply_combo_qss(self._scale_combo, editable=True)
         self._scale_combo.set_arrow_color(SiColors.TEXT_SECONDARY)
 
     def _apply_autostart_state(self, supported: bool) -> None:
@@ -407,11 +417,47 @@ class SettingsDialog(OverlayDialog):
             win.apply_theme_mode(mode)
 
     def _on_scale_selected(self, text: str) -> None:
-        """缩放仅落盘：Qt 的缩放因子须在应用启动前设置，重启后生效。"""
+        """可编辑下拉文本变化：解析百分比（选档位或键入都走这里）。"""
         try:
-            self._pending_ui_scale = float(text.replace("%", "")) / 100.0
+            raw = text.strip().rstrip("%")
+            if not raw:
+                return
+            value = float(raw) / 100.0
         except ValueError:
             return
+        self._pending_ui_scale = value
+
+    def _scale_pct_text(self, value: float) -> str:
+        """缩放值(小数) → 百分比显示文本，保留小数但去尾零（137.5→137.5%, 1.0→100%）。"""
+        return f"{value * 100:g}%"
+
+    def _on_scale_edited(self) -> None:
+        """键入完成后规范化显示：非法值回显、超范围钳制。"""
+        combo = self._scale_combo
+        raw = combo.currentText().strip().rstrip("%")
+        if not raw:
+            return
+        try:
+            value = float(raw) / 100.0
+        except ValueError:
+            # 非法输入回显当前值
+            combo.blockSignals(True)
+            combo.setCurrentText(self._scale_pct_text(self._pending_ui_scale))
+            combo.blockSignals(False)
+            return
+        # 钳制到允许范围（设置页 50%-200%；超出按边界）
+        low, high = settings_store._UI_SCALE_MIN, settings_store._UI_SCALE_MAX
+        value = min(max(value, low), high)
+        # 值未变（如回显规范化）直接返回，避免 setCurrentText 递归
+        if abs(value - self._pending_ui_scale) < 1e-9 and \
+                combo.currentText() == self._scale_pct_text(value):
+            return
+        self._pending_ui_scale = value
+        # 回显规范化文本；blockSignals 避免 setCurrentText 再触发
+        # _on_scale_selected 用舍入值覆盖刚保存的精确值（如 137.5→138）
+        combo.blockSignals(True)
+        combo.setCurrentText(self._scale_pct_text(value))
+        combo.blockSignals(False)
 
     def _save_and_accept(self) -> None:
         settings_store.set_minimize_to_tray(self._tray_toggle.isChecked())
@@ -431,6 +477,9 @@ class SettingsDialog(OverlayDialog):
             settings_store.set_voice_fab_enabled(self._voice_fab_toggle.isChecked())
         settings_store.set_hide_no_func_devices(self._hide_toggle.isChecked())
         settings_store.set_theme_mode(self._pending_mode)
+        # 界面缩放：记录是否变化，供保存后提示重启
+        old_scale = self._original_ui_scale
+        self._scale_changed = abs(self._pending_ui_scale - old_scale) >= 1e-6
         settings_store.set_ui_scale(self._pending_ui_scale)
         # 开机自启动写注册表：失败不阻断其余设置保存。
         # 开发模式开关已置灰为关，此处顺带清掉历史残留的无效注册项

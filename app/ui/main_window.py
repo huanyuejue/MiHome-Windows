@@ -681,8 +681,21 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self, devices=self._all_devices)
         self._settings_dialog = dlg
         dlg.exec()
+        scale_changed = getattr(dlg, "_scale_changed", False)
         dlg.deleteLater()
         self._settings_dialog = None
+        # 界面缩放改动需重启应用生效：提供一键重启（常驻托盘时关窗口
+        # 只是隐藏到托盘、进程仍在，仅提示会让用户以为没生效）
+        if scale_changed:
+            from app.ui.restart import restart_app
+            ret = QMessageBox.question(
+                self, "界面缩放已保存",
+                "界面缩放需重启应用后生效。\n是否立即重启？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes)
+            if ret == QMessageBox.Yes:
+                self._force_quit = True
+                restart_app()
         # 设置可能变了，同步托盘图标显隐
         from app.core.settings_store import get_minimize_to_tray
         if self._tray is not None:

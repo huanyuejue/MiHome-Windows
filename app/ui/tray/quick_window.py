@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -38,6 +38,34 @@ from app.ui.power_button import PowerButton
 from app.ui.si_theme import SiColors
 from app.ui.tray.audio_bar import _TrayAudioBar
 from app.ui.typewriter import TypewriterPlaceholder
+
+
+class _ElideLabel(QLabel):
+    """自动省略号截断的标签：文本过长时按可用宽度省略号收尾。
+
+    托盘设备行右侧有电源按钮，若设备名很长且 QLabel 按完整文本
+    强占最小宽度，会把电源按钮挤出窗口（行右半边被截断）。此处
+    让标签可被压缩，超宽部分绘制为省略号，按钮始终完整可见。
+    """
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        # 允许水平压缩（忽略 sizeHint 的完整文本宽），超宽走 paintEvent 省略
+        from PySide6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名约定)
+        from PySide6.QtGui import QPainter
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        color = self.palette().color(self.foregroundRole())
+        p.setPen(color)
+        p.setFont(self.font())
+        rect = self.rect().adjusted(0, 0, 0, 0)
+        elided = p.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, rect.width())
+        p.drawText(rect, self.alignment() | Qt.AlignmentFlag.AlignVCenter, elided)
+        p.end()
 
 
 class TrayQuickWindow(QDialog):
@@ -124,12 +152,10 @@ class TrayQuickWindow(QDialog):
         header.addWidget(close)
         lay.addLayout(header)
 
-        # 滚动列表：一排两个
+        # 滚动列表：单列垂直排布（每行占满宽度），高度随设备数动态
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.NoFrame)
-        # 固定高度：2 列 × 4 排卡片（56×4 + 间距6×3），窗口按上下栏显隐外扩
-        self._scroll.setFixedHeight(4 * 56 + 3 * 6)
         self._scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
             "QScrollBar:vertical { background: transparent; width: 6px; margin: 0 2px 0 0; }"
@@ -285,14 +311,25 @@ class TrayQuickWindow(QDialog):
     def _sync_tray_height(self) -> None:
         # 确定性计算窗口高度，不依赖 adjustSize（隐藏态会漏算语音条/音频栏）：
         # 由各固定子控件高度累加，显隐结果一致，呼出前即可得到正确尺寸避免闪烁；
-        # 已显示时外扩并保持底部贴边，避免语音/音频栏显隐挤压卡片
+        # 已显示时外扩并保持底部贴边，避免语音/音频栏显隐挤压卡片。
+        # 滚动区高度随设备数动态：单列每行 56 + 间距 6，上限约 4 行交给内部滚动。
+        n_devices = len([d for d in getattr(self, "_tray_dids", [])
+                         if d in {x.did for x in self._devices}])
+        if n_devices > 0 and not self._scroll.isHidden():
+            scroll_h = min(n_devices, 4) * 56 + max(0, min(n_devices, 4) - 1) * 6
+            if abs(scroll_h - self._scroll.height()) >= 2:
+                self._scroll.setFixedHeight(scroll_h)
+        else:
+            scroll_h = 56
+            if self._scroll.height() != scroll_h:
+                self._scroll.setFixedHeight(scroll_h)
         audio_h = 0
         if not self._audio_bar.isHidden():
             ah = self._audio_bar.sizeHint().height()
             audio_h = (ah if ah > 0 else 105) + 8  # 外层 spacing
         voice_h = 36 + 10 if not self._voice_frame.isHidden() else 0  # 36 + 间距10
-        # 根面板：标题 26 + 滚动区 242 + 上间距10 + 下间距10 + 内容边距 24
-        root_h = 26 + 242 + 24 + 20
+        # 根面板：标题 26 + 滚动区 scroll_h + 上间距10 + 下间距10 + 内容边距 24
+        root_h = 26 + scroll_h + 24 + 20
         h = audio_h + root_h + voice_h
         from PySide6.QtGui import QGuiApplication
         screen = QGuiApplication.primaryScreen()
@@ -446,29 +483,45 @@ class TrayQuickWindow(QDialog):
         dids = getattr(self, "_tray_dids", None)
         if dids is None:
             dids = self._tray_dids = tray_store.load()
-        if not dids:
+        lookup = {d.did: d for d in self._devices}
+        cards = [lookup[d] for d in dids if lookup.get(d)]
+        if not cards:
+            # 空列表，或保存的 did 在主列表中已全部失效：统一显示空态
             self._empty.show()
             self._scroll.hide()
+            self._sync_tray_height()
             return
         self._empty.hide()
         self._scroll.show()
-        lookup = {d.did: d for d in self._devices}
-        cards = [lookup[d] for d in dids if lookup.get(d)]
-        # 使用 QGridLayout + setColumnStretch 强制两列等宽，单卡也能保持半宽
+        # 单列布局：每行占满可用宽度，行数即设备数。两列布局在托盘
+        # 窗口宽度内每卡只有约半宽，长设备名 + 电源按钮会被挤出行外
+        # （行右半边被截断），单列从根上避免。
         self._grid = QGridLayout()
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setColumnStretch(0, 1)
-        self._grid.setColumnStretch(1, 1)
-        self._grid.setHorizontalSpacing(6)
+        self._grid.setHorizontalSpacing(0)
         self._grid.setVerticalSpacing(6)
+        # 按最长设备名的实际文本宽度估算窗口宽度，让名字尽量完整显示
+        name_font = QFont("Microsoft YaHei UI", 10, QFont.Weight.DemiBold)
+        fm = QFontMetrics(name_font)
+        max_text_w = max((fm.horizontalAdvance(d.name) for d in cards), default=0)
         for idx, dev in enumerate(cards):
             row = self._make_row(dev)
-            self._grid.addWidget(row, idx // 2, idx % 2)
+            self._grid.addWidget(row, idx, 0)
         self._list_lay.addLayout(self._grid)
         self._list_lay.addStretch(1)
         online_dids = [d for d in dids if lookup.get(d) and lookup[d].online and self._known_power.get(d) is None]
         if online_dids:
             self.refresh_power(online_dids)
+        # 滚动区高度随设备数动态（单列：行高 56 + 间距 6），超出上限交给滚动
+        self._sync_tray_height()
+        # 窗口宽度自适应内容：最长的设备名 + 电源按钮 + 边距，
+        # 不因固定 300 宽度把行右半边截断（含 DPI 缩放下的物理像素）
+        if max_text_w > 0:
+            need = max_text_w + 12 + 10 + 28 + 12 + 14 + 14 + 20
+            need = max(need, 280)  # 不低于原最小宽度
+            if self.width() < need:
+                self.resize(need, self.height())
 
     def _destroy_grid(self) -> None:
         grid = getattr(self, "_grid", None)
@@ -510,7 +563,7 @@ class TrayQuickWindow(QDialog):
 
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
-        name = QLabel(dev.name)
+        name = _ElideLabel(dev.name, self)
         name.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.DemiBold))
         name.setStyleSheet(f"color: {SiColors.TEXT_PRIMARY if dev.online else f'{SiColors.OFFLINE_TEXT}'}; background: transparent;")
         # 副标题：在线仅显示房间（+温湿度），离线才追加“· 离线”
@@ -519,7 +572,7 @@ class TrayQuickWindow(QDialog):
             sub_text = f"{dev.room_name} | {metrics}" if metrics else dev.room_name
         else:
             sub_text = f"{dev.room_name} · 离线"
-        sub = QLabel(sub_text)
+        sub = _ElideLabel(sub_text, self)
         self._sub_labels[dev.did] = sub
         sub.setStyleSheet(f"color: {SiColors.TEXT_SECONDARY if dev.online else f'{SiColors.OFFLINE_SUB}'}; background: transparent; font-size: 8pt;")
         text_col.addWidget(name)
