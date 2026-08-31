@@ -24,6 +24,7 @@ _DEFAULTS: dict = {
     "hide_no_func_devices": False,
     "default_speaker_did": "",  # 小爱指令默认输出音箱；空串=自动（第一个在线）
     "ui_scale": 1.0,    # 界面缩放个人微调乘数（叠加在软件基准缩放之上），需重启生效
+    "last_good_scale": 0.0,  # 上一次确认过的界面缩放；0 表示尚无记录（首次启动）
     "tray_columns": 2,  # 托盘快捷窗口卡片列数：1 或 2
     "check_update_enabled": True,  # 启动时自动检查 GitHub 新版本
 }
@@ -155,6 +156,30 @@ def set_ui_scale(value: float) -> None:
     value = float(value)
     # 超出 50%-200% 范围的值钳制到边界
     raw["ui_scale"] = min(max(value, _UI_SCALE_MIN), _UI_SCALE_MAX)
+    _write_raw(raw)
+
+
+def get_last_good_scale() -> float:
+    """上一次确认过的界面缩放；0 表示尚无记录（首次启动）。
+
+    用于「改坏 DPI 自动回滚」：用户修改缩放并重启后，若与上次确认值
+    不一致则进入倒计时确认；超时/拒绝则回滚到此值。未写入过时返回 0。
+    """
+    try:
+        value = float(_read_raw().get("last_good_scale", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    return value if value > 0 else 0.0
+
+
+def set_last_good_scale(value: float) -> None:
+    """记录一次已确认（用户保留或回滚完成）的界面缩放。"""
+    raw = _read_raw()
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = 0.0
+    raw["last_good_scale"] = value if value > 0 else 0.0
     _write_raw(raw)
 
 

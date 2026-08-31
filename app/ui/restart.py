@@ -17,10 +17,17 @@ from PySide6.QtCore import QProcess
 
 def restart_app() -> None:
     """退出当前进程并启动新实例；开发/打包形态均支持。"""
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QMainWindow
     app = QApplication.instance()
     if app is None:
         return
+
+    # 强制退出：closeEvent 在「最小化到托盘」开启时会把关窗拦截为隐藏，
+    # 不标记则 app.quit() 无法真正结束进程（新进程会因单实例被当成唤起）。
+    from app.ui.main_window import MainWindow
+    for w in QApplication.topLevelWidgets():
+        if isinstance(w, MainWindow):
+            w.request_force_quit()
 
     args = sys.argv[:]
     executable, argv = _launch_command(args)

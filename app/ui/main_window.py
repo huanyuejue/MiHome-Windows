@@ -712,6 +712,9 @@ class MainWindow(QMainWindow):
         # 只是隐藏到托盘、进程仍在，仅提示会让用户以为没生效）
         if scale_changed:
             from app.ui.restart import restart_app
+            from app.core.settings_store import (
+                get_last_good_scale, set_last_good_scale, set_ui_scale,
+            )
             ret = QMessageBox.question(
                 self, "界面缩放已保存",
                 "界面缩放需重启应用后生效。\n是否立即重启？",
@@ -720,6 +723,12 @@ class MainWindow(QMainWindow):
             if ret == QMessageBox.Yes:
                 self._force_quit = True
                 restart_app()
+            else:
+                # 拒绝重启 = 放弃这次缩放修改：恢复为原值并清掉 last_good，
+                # 否则下次启动会误触发「改坏 DPI 回滚」确认框
+                old_scale = get_last_good_scale() or 1.0
+                set_ui_scale(old_scale)
+                set_last_good_scale(0.0)
         # 设置可能变了，同步托盘图标显隐
         from app.core.settings_store import get_minimize_to_tray
         if self._tray is not None:

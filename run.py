@@ -153,6 +153,14 @@ def main() -> int:
         pass
 
     from app.core.settings_store import get_start_minimized, get_minimize_to_tray
+    # 改坏 DPI 自动回滚：检测到缩放与上次确认值不一致时进入倒计时确认。
+    # 必须在显示主窗口之前处理：若用户恢复（或超时），内部会回滚缩放并
+    # 自动重启，本进程将退出——此时不应先闪现主窗口再弹确认框。
+    # 主窗口已构造但未 show，恢复重启后直接返回结束进程。
+    from app.ui.scale_confirm import check_scale_after_start
+    if not check_scale_after_start():
+        return 0
+
     # 以托盘方式静默启动：完全不显示主窗口（设备列表在后台加载，
     # 卡片网格延迟到首次唤出才构建，常驻内存显著更低）。曾用
     # 「透明 show 再隐藏」初始化原生窗口，但那会连带构建整页卡片

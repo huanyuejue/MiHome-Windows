@@ -540,6 +540,9 @@ class SettingsDialog(OverlayDialog):
         # 界面缩放：记录是否变化，供保存后提示重启
         old_scale = self._original_ui_scale
         self._scale_changed = abs(self._pending_ui_scale - old_scale) >= 1e-6
+        # 变化时把旧值记为「上一次确认的缩放」：重启后若新值异常，可据此回滚
+        if self._scale_changed:
+            settings_store.set_last_good_scale(old_scale)
         settings_store.set_ui_scale(self._pending_ui_scale)
         # 开机自启动写注册表：失败不阻断其余设置保存。
         # 开发模式开关已置灰为关，此处顺带清掉历史残留的无效注册项
