@@ -226,7 +226,8 @@ class SettingsDialog(OverlayDialog):
         self._pending_ui_scale = self._original_ui_scale
         # 可编辑下拉：预设档位 + 直接键入任意百分比（无级调整，50-200）
         scale_labels = [f"{round(s * 100):d}%" for s in sorted(settings_store.UI_SCALES)]
-        current_pct = f"{round(self._pending_ui_scale * 100):g}%"
+        # 用 :g 保留小数（重启后回显 137.5% 而非 round 取整的 138%）
+        current_pct = f"{self._pending_ui_scale * 100:g}%"
         self._scale_combo = themed_combo(scale_labels, current=current_pct, editable=True)
         # 输入校验：不设 validator——任何 validator 都会在校验中间态时
         # 干扰增量输入（QDoubleValidator 范围校验拒绝"1"、"12"这类中间值，

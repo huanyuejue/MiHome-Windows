@@ -597,7 +597,7 @@ def apply_combo_qss(combo, editable: bool = False) -> None:
             background: {SiColors.SURFACE};
             border: 1px solid {SiColors.LINE};
             border-radius: 8px;
-            padding: 4px {28 if editable else 28}px 4px 12px;
+            padding: 4px {8 if editable else 28}px 4px 12px;
             color: {SiColors.TEXT_PRIMARY};
             font-size: 9pt;
         }}
