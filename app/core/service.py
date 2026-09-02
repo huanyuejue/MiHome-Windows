@@ -26,7 +26,9 @@ from mijiaAPI import (
     mijiaDevice,
 )
 from mijiaAPI.devices import DevAction, DevProp
+from mijiaAPI.miutils import generate_enc_params, gen_nonce, get_signed_nonce
 
+from . import icon_store
 from .models import ActionInfo, DeviceDetail, DeviceInfo, PropInfo
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,9 @@ class MijiaService:
         # spec 产品名缓存就绪后的产品页中文名缓存：
         # model -> 中文名或 None（已确认无中文名，不再重查）
         self._product_page_names: dict[str, str | None] = {}
+        # model -> 图标 URL 或 None（拉取失败，会话内不再重试）；
+        # 启动即从磁盘加载，此后只增不删（见 icon_store）
+        self._icon_cache: dict[str, str | None] = icon_store.load_urls()
 
     def _init_api(self) -> mijiaAPI:
         """构造上游客户端；认证文件损坏时隔离坏文件并降级为未登录。
@@ -531,6 +536,71 @@ class MijiaService:
             raise _wrap_error(exc, "获取设备列表失败") from exc
         for d in all_devices:
             self._device_index[str(d["did"])] = (d.get("model", ""), d.get("name", ""))
+
+    # ---------- 设备图标 ----------
+
+    def icon_urls(self, models: list[str]) -> dict[str, str | None]:
+        """model -> 图标 URL，增量拉取：只对缓存里没有的型号调接口。
+
+        成功结果写入内存与磁盘缓存；失败仅记内存 None（本次会话不再
+        重试，下次启动重新尝试），避免网络抖动时每轮刷新重复打接口。
+        """
+        if not models:
+            return {}
+        missing = [m for m in models if m not in self._icon_cache]
+        if missing:
+            for model in missing:
+                self._icon_cache[model] = self._fetch_icon_url(model)
+            icon_store.save_urls(
+                {k: v for k, v in self._icon_cache.items() if v})
+        return {m: self._icon_cache[m] for m in models if self._icon_cache.get(m)}
+
+    def _fetch_icon_url(self, model: str) -> str | None:
+        """调 productconfig/get_icon 取图标 CDN 地址（302 重定向的 Location）。
+
+        与 _request 的差异：这个接口靠重定向返回图片地址而非 JSON 响应体，
+        必须关闭自动跟随重定向自己读 Location；签名与刷新逻辑保持一致。
+        """
+        uri = "/v2/productconfig/get_icon"
+        try:
+            self._api._refresh_token()
+            params = {"data": json.dumps(
+                {"icon_name": "icon_real", "model": model},
+                separators=(",", ":"))}
+            nonce = gen_nonce()
+            signed_nonce = get_signed_nonce(self._api.auth_data["ssecurity"], nonce)
+            params = generate_enc_params(
+                uri, "POST", signed_nonce, nonce, params,
+                self._api.auth_data["ssecurity"])
+            ret = self._api.session.post(
+                self._api.api_base_url + uri, data=params,
+                allow_redirects=False, timeout=30)
+        except Exception as exc:
+            logger.warning("获取设备图标失败 %s: %s", model, exc)
+            return None
+        if ret.status_code != 302:
+            logger.info("获取设备图标未重定向 %s: HTTP %s", model, ret.status_code)
+            return None
+        return ret.headers.get("Location")
+
+    def icon_file(self, model: str, url: str) -> Path | None:
+        """下载图标到本地缓存并返回文件路径；已存在直接返回，失败返回 None。"""
+        path = icon_store.icon_path(model)
+        if path.exists():
+            return path
+        import requests
+
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code != 200 or not r.content:
+                logger.warning("下载设备图标失败 %s: HTTP %s", model, r.status_code)
+                return None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(r.content)
+            return path
+        except Exception as exc:
+            logger.warning("下载设备图标失败 %s: %s", model, exc)
+            return None
 
     def has_product_page_name(self, model: str) -> bool:
         """该型号的产品页中文名是否已解析过（含“确认无”的情况）。"""

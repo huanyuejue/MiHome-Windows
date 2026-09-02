@@ -13,6 +13,7 @@ import ctypes
 import ctypes.wintypes as wintypes
 import logging
 import sys
+from pathlib import Path
 
 import shiboken6
 from PySide6.QtCore import QPropertyAnimation, QPoint, QSize, Qt, QTimer
@@ -37,6 +38,7 @@ from app.siui.components.button import SiToggleButtonRefactor
 import qtawesome as qta
 
 from app.core import cache as device_cache
+from app.core import icon_store
 from app.core.jobs import JobExecutor
 from app.core.models import DeviceInfo, is_speaker
 from app.core.service import MijiaService
@@ -577,6 +579,45 @@ class MainWindow(QMainWindow):
         self._refresh_metrics()
         self._update_voice_fab()
         self._update_tray_devices()
+        self._load_card_icons()
+
+    # ---------- 设备图标 ----------
+
+    def _load_card_icons(self) -> None:
+        """增量拉取设备图标：只对缓存里没有的型号调接口。
+
+        已下载图片的卡片回填由 _rebuild_grid 负责（建卡即查本地文件），
+        本方法只处理缺失部分：拉 URL、缺图下发下载；图标 URL 与图片
+        都落本地缓存（见 icon_store），设备列表不变时不会重复调接口。
+        """
+        models = sorted({d.model for d in self._all_devices if d.model})
+        if not models:
+            return
+        self._jobs.submit(
+            lambda m=models: self._service.icon_urls(m),
+            on_success=self._on_icons_ready,
+        )
+
+    def _on_icons_ready(self, urls: dict[str, str | None]) -> None:
+        """图标 URL 就绪：缺图的下发后台下载，下载完成回填当前可见卡片。"""
+        for model, url in urls.items():
+            if not url:
+                continue
+            if icon_store.icon_path(model).is_file():
+                continue
+            self._jobs.submit(
+                lambda m=model, u=url: self._service.icon_file(m, u),
+                on_success=lambda p, m=model: self._apply_card_icon(m, str(p))
+                if p else None,
+            )
+
+    def _apply_card_icon(self, model: str, path: str) -> None:
+        """同一型号的所有卡片共用一份图标图片。"""
+        if not path:
+            return
+        for card in self._cards.values():
+            if card.device.model == model:
+                card.set_icon(Path(path))
 
     def _maybe_localize_names(self) -> None:
         """未改名英文设备用中文名替换显示名（两个来源按序兜底）。
@@ -1044,6 +1085,11 @@ class MainWindow(QMainWindow):
                 card.set_power_state(known)
             if device.did in self._metrics:
                 card.set_metrics(self._metrics.get(device.did))
+            # 已下载的图标从本地文件回填：主题/tab 切换重建卡片后
+            # 图标不消失；未下载的由 _load_card_icons 后台补齐
+            path = icon_store.icon_path(device.model)
+            if path.is_file():
+                card.set_icon(path)
             card.power_clicked.connect(self._on_power_clicked)
             card.open_requested.connect(self._on_open_device)
             self._cards[device.did] = card

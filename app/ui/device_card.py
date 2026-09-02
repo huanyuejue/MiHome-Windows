@@ -11,8 +11,12 @@
 确认有可写开关属性后才显示并回填真实状态。
 """
 
+from pathlib import Path
+
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QPixmap
 from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
@@ -26,7 +30,8 @@ from app.ui.power_button import PowerButton
 from app.ui.si_theme import SiColors
 
 _POWER_BTN_SIZE = 36
-_CARD_FIXED_WIDTH = 202
+_ICON_SIZE = 36
+_CARD_FIXED_WIDTH = 216
 _CARD_FIXED_HEIGHT = 92
 
 # 离线卡片的灰置配色：背景更暗、文字更灰，hover 不提亮
@@ -76,6 +81,12 @@ class DeviceCard(SiRowCard):
         if not self._online:
             self._power_btn.setEnabled(False)
 
+        # 设备图标：后台拉取就绪后由 set_icon 填入，未就绪前保持隐藏
+        self._icon_label = QLabel()
+        self._icon_label.setFixedSize(_ICON_SIZE, _ICON_SIZE)
+        self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._icon_label.hide()
+
         # 左侧文字列整体垂直居中，与右侧电源钮同一水平轴
         text_col = QWidget()
         text_col.setAttribute(Qt.WA_TranslucentBackground)
@@ -88,12 +99,26 @@ class DeviceCard(SiRowCard):
         text_lay.addStretch(1)
 
         lay = self.layout()
-        lay.setContentsMargins(18, 10, 18, 10)
+        lay.setContentsMargins(14, 10, 18, 10)
+        lay.addWidget(self._icon_label, alignment=Qt.AlignVCenter)
+        lay.addSpacing(10)
         lay.addWidget(text_col)
         lay.addStretch(1)
         lay.addWidget(self._power_btn, alignment=Qt.AlignVCenter)
 
     # ---------- 状态渲染 ----------
+
+    def set_icon(self, path: Path | None) -> None:
+        """填入设备图标；路径无效或图片损坏时保持隐藏不打断布局。"""
+        if path is None or not path.is_file():
+            return
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return
+        self._icon_label.setPixmap(pixmap.scaled(
+            _ICON_SIZE, _ICON_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+        self._icon_label.show()
 
     def set_power_state(self, state: bool) -> None:
         # 能设置状态即证明设备具备开关能力，电源钮随之可见
