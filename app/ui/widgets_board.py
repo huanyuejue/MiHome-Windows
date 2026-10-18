@@ -675,6 +675,10 @@ class WidgetsBoard(QWidget):
         self._root.show()
         self._collapsed = False
         self._apply_expanded_geometry()
+        # 折叠期间主窗口推送设备清单时走的是 _sync_dots（不建卡），
+        # 展开必须按最新清单重建一次，否则会停在构造期那份空网格上
+        # ——用户看到的就是「收着有状态点、展开却说还没有添加设备」。
+        self._rebuild()
         self._apply_opacity()
 
     # ---------- 折叠横条的状态表达 ----------

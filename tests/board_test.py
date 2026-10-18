@@ -696,6 +696,30 @@ app.processEvents()
 assert not board.collapsed and board.width() == 1058
 print("15. 折叠宽度锚定 + 智能降级（点→聚合→宽条恢复）OK")
 
+# ---------- 16. 启动时是收起态 → 展开必须重建卡片 ----------
+# 事故：上次退出时挂件收起，构造期只建了空网格；启动后主窗口在折叠态
+# 推送设备清单时只更新状态点（不建卡），于是展开后停在「还没有添加设备」，
+# 而折叠条上明明有一排状态点、管理窗里也勾着一堆设备。
+board_store.set_columns(3)
+board_store.save_devices([d.did for d in devs])
+board_store.set_collapsed(True)          # 模拟上次退出时是收起态
+startup = WidgetsBoard(MijiaService(), jobs, None)
+startup.show()
+app.processEvents()
+assert startup.collapsed, "构造期应恢复为收起态"
+assert not getattr(startup, "_cards", {}), "收起态构造期不应建卡"
+
+startup.set_devices(devs, power)         # 折叠期间推送设备清单
+app.processEvents()
+startup._expand()                        # 用户点展开
+app.processEvents()
+assert len(startup._cards) == len(devs), \
+    f"展开后未按最新清单重建卡片: {len(startup._cards)} 张（应为 {len(devs)}）"
+assert not startup._empty.isVisible(), "有设备时展开却显示了『还没有添加设备』空态"
+startup.hide()
+board_store.set_collapsed(False)
+print("16. 收起态启动 → 展开重建卡片 OK")
+
 # ---------- 收尾：清运行数据 ----------
 win._all_devices = []
 win._force_quit = True

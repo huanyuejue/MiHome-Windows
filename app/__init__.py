@@ -5,7 +5,7 @@
 # 本程序为自由软件，基于 GPL-3.0 或更高版本发布；在遵守许可证的前提下，
 # 你可以自由使用、修改和再分发它。本程序不含任何担保，详见 LICENSE 文件。
 
-__version__ = "0.3.5"
+__version__ = "0.3.6"
 
 import logging
 import sys
