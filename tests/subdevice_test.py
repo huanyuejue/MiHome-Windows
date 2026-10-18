@@ -38,7 +38,7 @@ assert MijiaService._gang_from_did("1234567890.s3") == 3
 assert MijiaService._gang_from_did("1234567890.s4") == 4
 assert MijiaService._gang_from_did("1234567890") is None, "父设备不带后缀"
 assert MijiaService._gang_from_did("blt.3.1fv3aoemc4c01") is None, "mac 风格 did 不应误判"
-assert MijiaService._gang_from_did("120244952") is None
+assert MijiaService._gang_from_did("987654321") is None
 print("1. did 后缀 → 通道号 OK")
 
 # ---------- 2. on 属性按通道挑选 ----------
@@ -53,7 +53,7 @@ assert method_of("1234567890.s4") == {"siid": 4, "piid": 1}
 # 父设备无后缀：沿用第一条（历史行为，用户反馈父设备本来就能开关）
 assert method_of("1234567890") == {"siid": 2, "piid": 1}
 # 单键设备不受影响
-assert MijiaService._find_on_method(SPEC_1GANG, "120244952") == {"siid": 2, "piid": 1}
+assert MijiaService._find_on_method(SPEC_1GANG, "987654321") == {"siid": 2, "piid": 1}
 # 后缀与 siid 对不上时按顺序兜底（s2→第1条，s3→第2条）
 assert MijiaService._find_on_method(SPEC_3GANG, "x.s3") == {"siid": 3, "piid": 1}
 SPARSE = {"properties": [
