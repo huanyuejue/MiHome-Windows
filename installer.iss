@@ -11,7 +11,7 @@
 ; 并提供开始菜单快捷方式与卸载程序。
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.4"
+  #define MyAppVersion "0.3.5"
 #endif
 
 #define MyAppName "MiHome-Windows"

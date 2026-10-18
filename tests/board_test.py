@@ -21,7 +21,7 @@ isolate()
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 app = QApplication([])
 
@@ -632,6 +632,69 @@ _mw.BoardManagerDialog = _RealDialog
 assert len(created) == 1, f"连点 + 开了多个管理窗: {len(created)} 个"
 assert win._board_manager is None, "对话框关闭后未清空引用（会影响下次打开）"
 print("14. 连点 + 只开一个管理窗 OK")
+
+# ---------- 15. 折叠横条：宽度锚定展开宽度 + 设备多时自动降级 ----------
+from app.ui.widgets_board import _AggregateBar as _AggBar
+
+
+def _dot_widgets(b):
+    out = []
+    for i in range(b._dot_lay.count()):
+        w = b._dot_lay.itemAt(i).widget()
+        if w is not None:
+            out.append(w)
+    return out
+
+
+def _has_aggregate(b):
+    return any(isinstance(w, _AggBar) for w in _dot_widgets(b))
+
+
+many = [DeviceInfo(did=f"m{i}", name=f"设备{i}", model="a.b.c", home_name="家",
+                   room_name="客厅", online=(i % 5 != 0)) for i in range(20)]
+many_power = {d.did: (i % 2 == 0) for i, d in enumerate(many)}
+
+# 1 列（展开 188px）+ 20 台：设备再多也不能把横条撑宽
+board_store.set_columns(1)
+board.set_columns(1)
+board_store.save_devices([d.did for d in many])
+board.set_devices(many, many_power)
+board._collapse()
+app.processEvents()
+assert board.collapsed
+assert board.width() == board._board_width() == 188, \
+    f"折叠横条宽度未锚定展开宽度: {board.width()} vs {board._board_width()}"
+assert _has_aggregate(board), "20 台设备在 188px 里应降级为聚合状态条"
+counts = [w.text() for w in _dot_widgets(board)
+          if isinstance(w, QLabel) and w.text().endswith(" 开")]
+assert counts and counts[0].endswith("/20 开"), f"聚合模式缺计数: {counts}"
+assert "设备0" in board._bar.toolTip(), "聚合模式应在 tooltip 里给出逐台明细"
+assert board._bar_title.isHidden(), "188px 宽度下标题应隐藏，把位置让给状态"
+
+# 1 列 + 8 台：体积够，回到逐台状态点
+board_store.save_devices([d.did for d in many[:8]])
+board.set_devices(many[:8], {k: v for k, v in many_power.items()
+                            if k in {d.did for d in many[:8]}})
+app.processEvents()
+assert board.width() == 188
+assert not _has_aggregate(board), "8 台在 188px 里应仍用逐台状态点"
+assert len(_dot_widgets(board)) >= 8, "状态点数量不足"
+
+# 6 列（1058px）+ 20 台：宽度跟着列数走，点也放得下
+board_store.set_columns(6)
+board.set_columns(6)
+board_store.save_devices([d.did for d in many])
+board.set_devices(many, many_power)
+app.processEvents()
+assert board.width() == board._board_width() == 1058, \
+    f"改列数后折叠宽度未跟随: {board.width()}"
+assert not _has_aggregate(board), "1058px 宽度下 20 台应能用逐台状态点"
+
+# 展开 → 宽度回到展开态（同一套锚点）
+board._expand()
+app.processEvents()
+assert not board.collapsed and board.width() == 1058
+print("15. 折叠宽度锚定 + 智能降级（点→聚合→宽条恢复）OK")
 
 # ---------- 收尾：清运行数据 ----------
 win._all_devices = []

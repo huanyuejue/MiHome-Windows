@@ -18,8 +18,8 @@
 房间/温湿度副标题 + 圆形电源钮；点击卡片本体打开完整详情面板。
 """
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication
+from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QPainter
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -51,6 +51,13 @@ _GRID_SPACING = 6
 _DRAG_HANDLE_HEIGHT = 22
 # 判定"拖动"而非"点击"的位移阈值（像素）：太小会误判抖动，太大拖不动
 _DRAG_THRESHOLD = 5
+
+# 折叠横条里状态点的候选尺寸 (点径, 间距)：放不下就逐级缩小，再放不下改聚合条
+_DOT_STEPS = ((9, 5), (7, 4), (5, 3))
+# 折叠横条固定开销：左右边距 20 + 抓握纹 10 + 展开按钮 22
+_BAR_FIXED_W = 20 + 10 + 22
+# 横条里放得下标题的最小宽度（窄了先把标题让给状态区）
+_BAR_TITLE_MIN_W = 300
 
 # 挂件自称：桌面上只有这一块面板，标题要让人一眼知道它是谁家的
 # 换产品名只改这两行即可
@@ -110,6 +117,7 @@ class _BoardPalette:
             self.offline_text = SiColors.OFFLINE_TEXT
             self.offline_sub = SiColors.OFFLINE_SUB
             self.state_unknown_border = SiColors.STATE_UNKNOWN_BORDER
+            self.state_off = SiColors.STATE_OFF
             self.is_custom = False
             return
 
@@ -134,6 +142,7 @@ class _BoardPalette:
             self.offline_text = _rgba(white, 0.42)
             self.offline_sub = _rgba(white, 0.28)
             self.state_unknown_border = _rgba(white, 0.35)
+            self.state_off = _rgba(white, 0.28)
         else:
             black = QColor(0, 0, 0)
             self.card = _mix(base, black, 0.05).name()
@@ -150,6 +159,70 @@ class _BoardPalette:
             self.offline_text = _rgba(black, 0.38)
             self.offline_sub = _rgba(black, 0.26)
             self.state_unknown_border = _rgba(black, 0.30)
+            self.state_off = _rgba(black, 0.26)
+
+
+def _qcolor(spec: str) -> QColor:
+    """把样式表颜色串转成 QColor（支持 #rrggbb 与 rgba(r,g,b,a)）。"""
+    s = (spec or "").strip()
+    if s.startswith(("rgba(", "rgb(")):
+        inner = s[s.index("(") + 1:s.rindex(")")]
+        parts = [p.strip() for p in inner.split(",")]
+        try:
+            r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+            a = int(round(float(parts[3]))) if len(parts) > 3 else 255
+            return QColor(r, g, b, a)
+        except (ValueError, IndexError):
+            return QColor("gray")
+    return QColor(s)
+
+
+class _AggregateBar(QWidget):
+    """折叠横条的聚合状态条：每台设备一段，按开 / 关 / 未知 / 离线着色。
+
+    设备多到状态点放不下时用它表达——宽度只跟着窗口走，**永远不会撑宽挂件**。
+    逐台明细放在横条的 tooltip 里。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._states: list[tuple[bool | None, bool]] = []
+        self._palette: _BoardPalette | None = None
+        self.setMinimumHeight(10)
+        self.setMinimumWidth(40)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_states(self, states: list[tuple[bool | None, bool]],
+                   palette: "_BoardPalette") -> None:
+        self._states = list(states)
+        self._palette = palette
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if not self._states or self._palette is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        n = len(self._states)
+        gap = 2.0 if n > 1 else 0.0
+        seg = max(2.0, (self.width() - gap * (n - 1)) / n)
+        height = min(8.0, max(4.0, self.height()))
+        top = (self.height() - height) / 2
+        x = 0.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        for state, online in self._states:
+            if not online:
+                color = _qcolor(self._palette.offline_sub)
+            elif state is True:
+                color = QColor(SiColors.THEME)
+            elif state is False:
+                color = _qcolor(self._palette.state_off)
+            else:
+                color = _qcolor(self._palette.state_unknown_border)
+            painter.setBrush(color)
+            painter.drawRoundedRect(QRectF(x, top, seg, height), 2, 2)
+            x += seg + gap
+        painter.end()
 
 
 class WidgetsBoard(QWidget):
@@ -320,7 +393,7 @@ class WidgetsBoard(QWidget):
         self._dot_lay.setContentsMargins(0, 0, 0, 0)
         self._dot_lay.setSpacing(5)
         self._dot_lay.addStretch(1)
-        bar_lay.addWidget(self._dot_host)
+        bar_lay.addWidget(self._dot_host, stretch=1)
         # 展开按钮：向上箭头
         expand = self._make_tool_button('mdi.chevron-up', "展开挂件", self._expand)
         bar_lay.addWidget(expand)
@@ -579,15 +652,19 @@ class WidgetsBoard(QWidget):
             self._collapse()
 
     def _swap_to_collapsed(self) -> None:
+        """收起为细横条：**宽度锁定为展开态宽度**。
+
+        曾经这里按「设备台数」逐台加宽（每台 14px），1 列摆放时设备一多，
+        横条会比展开态宽出好几倍，把桌面分区撑开（20 台时 497px vs 188px）。
+        现在宽度只由列数决定，装不下的设备信息在横条内部降级表达
+        （缩小状态点 → 聚合比例条），见 _sync_dots。
+        """
         geo = self.geometry()
         self._expanded_geom = (geo.x(), geo.y(), self._board_width(), self._board_height())
         self._root.hide()
         self._bar.show()
         self._collapsed = True
-        # 横条宽 = 左右边距 20 + 抓握纹 10 + 标题 + 间距 + 每台设备点 14 + 展开按钮 22
-        dots = len(self._dids) * 14 + max(0, len(self._dids) - 1) * 5
-        title_w = self._bar_title.sizeHint().width()
-        self.resize(max(150, 20 + 10 + title_w + 6 + dots + 6 + 22), _COLLAPSE_HEIGHT)
+        self.resize(self._board_width(), _COLLAPSE_HEIGHT)
         self._sync_dots()
         # 折叠/展开不淡变透明度：windowOpacity 是用户设定值，动画会
         # 在中途覆盖它并在结束时跳回，观感是一次闪烁
@@ -600,39 +677,134 @@ class WidgetsBoard(QWidget):
         self._apply_expanded_geometry()
         self._apply_opacity()
 
+    # ---------- 折叠横条的状态表达 ----------
+
+    def _relayout_bar(self) -> None:
+        """状态区内容变化后强制重排横条布局。
+
+        Qt 在隐藏控件后不会自动重排已有项的几何：隐藏标题时若不手动
+        activate，标题仍占着原位置，状态区就和它叠在一起（实测截图如此）。
+        """
+        self._dot_host.updateGeometry()
+        lay = self._bar.layout()
+        if lay is not None:
+            lay.activate()
+
+    def _dots_area_width(self, *, title: bool) -> int:
+        """状态区可用宽度：总宽 - 固定开销 - 间距 -（标题宽）。"""
+        spaces = 6 * (3 if title else 2)
+        title_w = self._bar_title.sizeHint().width() if title else 0
+        return max(0, self.width() - _BAR_FIXED_W - spaces - title_w)
+
+    def _dot_plan(self, count: int):
+        """挑一套排布：(点径, 间距, 是否保留标题)；None 表示该走聚合条。"""
+        for dot, gap in _DOT_STEPS:
+            need = count * (dot + gap) - gap
+            # 优先保留标题（能认出这是谁家的挂件），其次才牺牲标题保尺寸
+            if need <= self._dots_area_width(title=True):
+                return dot, gap, True
+            if need <= self._dots_area_width(title=False):
+                return dot, gap, False
+        return None
+
+    @staticmethod
+    def _bar_tooltip(items: list) -> str:
+        """折叠横条的明细 tooltip：聚合模式下这是唯一的逐台信息入口。"""
+        lines = []
+        for dev, state, online in items:
+            if not online:
+                text = "离线"
+            elif state is True:
+                text = "开"
+            elif state is False:
+                text = "关"
+            else:
+                text = "状态未知"
+            lines.append(f"{dev.name}（{dev.room_name}）· {text}")
+        if len(lines) > 20:
+            lines = lines[:20] + [f"… 另有 {len(lines) - 20} 台"]
+        return "\n".join(lines)
+
+    def _collapsed_items(self) -> list:
+        lookup = {d.did: d for d in self._devices}
+        items = []
+        for did in self._dids:
+            dev = lookup.get(did)
+            if dev is None:
+                continue
+            items.append((dev, self._known_power.get(did), dev.online))
+        return items
+
     def _sync_dots(self) -> None:
-        """重建折叠横条上的状态点（绿=开，灰=关，描边=未知，暗=离线）。"""
+        """重建折叠横条的状态表达：逐台状态点，太多则降级为聚合比例条。
+
+        降级顺序（宽度固定，绝不撑宽窗口）：
+            9px 点 → 7px → 5px（每级都先试着保留标题，再牺牲标题）
+            → 仍放不下：一条「开/关/离线」比例段 + "n/m 开" 计数，
+              逐台明细进 tooltip。
+        """
         import shiboken6
 
         while self._dot_lay.count():
             item = self._dot_lay.takeAt(0)
             w = item.widget()
-            if w is not None and shiboken6.isValid(w):
+            if w is not None:
+                # 先摘掉父子关系再 deleteLater：只是移出布局的话，
+                # 旧状态点/聚合条（几何还是旧宽度）会继续画在新内容上面，
+                # 表现为「换成小圆点后屏幕上却是一排长条」
+                w.setParent(None)
                 w.deleteLater()
-        lookup = {d.did: d for d in self._devices}
-        for did in self._dids:
-            dev = lookup.get(did)
-            if dev is None:
-                continue
-            dot = QLabel()
-            dot.setFixedSize(9, 9)
-            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            if not dev.online:
-                color, border = "transparent", self._palette.offline_sub
-            else:
-                state = self._known_power.get(did)
-                if state is True:
+
+        items = self._collapsed_items()
+        self._bar.setToolTip(self._bar_tooltip(items))
+        if not items:
+            self._bar_title.setVisible(True)
+            self._dot_lay.setSpacing(5)
+            self._dot_lay.addStretch(1)
+            self._relayout_bar()
+            return
+
+        plan = self._dot_plan(len(items))
+        if plan is not None:
+            dot, gap, show_title = plan
+            self._bar_title.setVisible(show_title)
+            self._dot_lay.setSpacing(gap)
+            radius = max(2, dot // 2)
+            for dev, state, online in items:
+                point = QLabel()
+                point.setFixedSize(dot, dot)
+                point.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                if not online:
+                    color, border = "transparent", self._palette.offline_sub
+                elif state is True:
                     color, border = SiColors.THEME, SiColors.THEME
                 elif state is False:
-                    color, border = SiColors.STATE_OFF, SiColors.STATE_OFF
+                    color, border = self._palette.state_off, self._palette.state_off
                 else:
                     color, border = "transparent", self._palette.state_unknown_border
-            dot.setStyleSheet(
-                f"QLabel {{ background: {color}; border: 1px solid {border};"
-                " border-radius: 4px; }")
-            dot.setToolTip(f"{dev.name}（{dev.room_name}）")
-            self._dot_lay.addWidget(dot)
-        self._dot_lay.addStretch(1)
+                point.setStyleSheet(
+                    f"QLabel {{ background: {color}; border: 1px solid {border};"
+                    f" border-radius: {radius}px; }}")
+                self._dot_lay.addWidget(point)
+            self._dot_lay.addStretch(1)
+            self._relayout_bar()
+            return
+
+        # 聚合模式：比例段 + 计数
+        self._bar_title.setVisible(self.width() >= _BAR_TITLE_MIN_W)
+        self._dot_lay.setSpacing(6)
+        bar = _AggregateBar(self._dot_host)
+        bar.set_states([(state, online) for _dev, state, online in items],
+                       self._palette)
+        self._dot_lay.addWidget(bar, stretch=1)
+        on = sum(1 for _dev, state, online in items if online and state is True)
+        count = QLabel(f"{on}/{len(items)} 开")
+        count.setStyleSheet(
+            f"color: {self._palette.text_secondary}; background: transparent;"
+            " font-size: 8pt;")
+        count.setToolTip("已开 / 总台数；逐台明细见横条悬停提示")
+        self._dot_lay.addWidget(count)
+        self._relayout_bar()
 
     # ---------- 数据 ----------
 
@@ -791,6 +963,10 @@ class WidgetsBoard(QWidget):
         self._columns = min(max(int(value), 1), 6)
         board_store.set_columns(self._columns)
         if self._collapsed:
+            # 折叠态宽度锚定展开宽度：改列数时横条要跟着变，
+            # 否则管理窗里调完列数、收起后宽度还对不上
+            self.resize(self._board_width(), _COLLAPSE_HEIGHT)
+            self._sync_dots()
             return
         self._rebuild()
 
