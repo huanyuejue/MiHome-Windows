@@ -5,6 +5,11 @@ import sys
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
+# 配置写入临时目录：测试绝不能碰项目根下的真实配置
+from tests._isolate import isolate
+
+isolate()
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -152,6 +157,7 @@ if win._tray is not None:
 print("7. 托盘整窗重建 + 自动恢复显示 OK")
 
 win._all_devices = []  # 关闭路径不保存假设备
+# 后台线程是 daemon，进程退出时自然结束，测试不必显式 join
 win.close()
 jobs.shutdown()
 settings_store.set_theme_mode("system")

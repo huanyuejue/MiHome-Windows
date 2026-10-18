@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core import board_store
 from app.core import settings_store
 from app.core.models import is_speaker
 from app.ui.overlay_dialog import OverlayDialog
@@ -331,6 +332,17 @@ class SettingsDialog(OverlayDialog):
         _sync_switch(self._start_min_toggle)
         start_min_row.addWidget(self._start_min_toggle)
 
+        # ── 桌面挂件：启动时自动显示 ──
+        self._board_item, self._board_label, self._board_desc, board_row = self._make_item(
+            "启动时显示桌面挂件",
+            "开启后每次启动都显示挂件；关闭时跟随上次退出时的状态"
+            "（上次开着就继续开着，上次关了就不弹）。"
+            "挂件的设备、列数与透明度在「管理桌面挂件」中调整")
+        self._board_toggle = themed_switch()
+        self._board_toggle.setChecked(board_store.get_autostart())
+        _sync_switch(self._board_toggle)
+        board_row.addWidget(self._board_toggle)
+
         # ── 隐藏无可控制功能的设备 ──
         self._hide_item, self._hide_label, self._hide_desc, hide_row = self._make_item(
             "隐藏无可控制功能的设备",
@@ -352,7 +364,8 @@ class SettingsDialog(OverlayDialog):
 
         return self._build_scroll([
             self._autostart_item, self._speaker_item, self._tray_item,
-            self._start_min_item, self._hide_item, self._update_item,
+            self._start_min_item, self._board_item, self._hide_item,
+            self._update_item,
         ])
 
     # ---------- 分类切换 ----------
@@ -408,7 +421,7 @@ class SettingsDialog(OverlayDialog):
         for item in (self._tray_item, self._start_min_item, self._fab_item,
                      self._scene_item, self._theme_item, self._autostart_item,
                      self._speaker_item, self._hide_item, self._scale_item,
-                     self._update_item):
+                     self._update_item, self._board_item):
             item.setStyleSheet(panel_card)
             # 高度按内容自适应（不固定）：长描述换行后行自然变高，
             # 不会被固定 64px 裁掉；短描述保持紧凑。QScrollArea 负责
@@ -419,13 +432,13 @@ class SettingsDialog(OverlayDialog):
         for label in (self._tray_label, self._start_min_label, self._fab_label,
                       self._scene_label, self._theme_label, self._autostart_label,
                       self._speaker_label, self._hide_label, self._scale_label,
-                      self._update_label):
+                      self._update_label, self._board_label):
             label.setStyleSheet(
                 f"color: {SiColors.TEXT_PRIMARY}; background: transparent; font-size: 10pt;")
         for desc in (self._tray_desc, self._start_min_desc, self._fab_desc,
                      self._scene_desc, self._theme_desc, self._autostart_desc,
                      self._speaker_desc, self._hide_desc, self._scale_desc,
-                     self._update_desc):
+                     self._update_desc, self._board_desc):
             desc.setStyleSheet(
                 f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 7pt;")
         self._done_btn.setStyleSheet(
@@ -549,6 +562,7 @@ class SettingsDialog(OverlayDialog):
         if self._devices:
             settings_store.set_voice_fab_enabled(self._voice_fab_toggle.isChecked())
         settings_store.set_hide_no_func_devices(self._hide_toggle.isChecked())
+        board_store.set_autostart(self._board_toggle.isChecked())
         settings_store.set_show_scene_tab(self._scene_toggle.isChecked())
         settings_store.set_check_update_enabled(self._update_toggle.isChecked())
         settings_store.set_theme_mode(self._pending_mode)

@@ -34,11 +34,20 @@ from mijiaAPI.miutils import generate_enc_params, gen_nonce, get_signed_nonce
 
 from . import icon_store, spec_zh
 from .models import ActionInfo, DeviceDetail, DeviceInfo, PropInfo, SceneInfo
+from .net_guard import install_default_timeout
+
+# 上游多处 HTTP 调用没有 timeout（登录取二维码、刷新 token、设备列表），
+# 网络不通时会无限等待、界面永远转圈。在所有网络调用发生前补上默认超时。
+install_default_timeout()
 
 logger = logging.getLogger(__name__)
 
-# 单次批量属性读取的设备数上限，防止请求体过大被网关拒绝
-_BATCH_SIZE = 15
+# 单次批量属性读取的设备数上限，防止请求体过大被网关拒绝。
+# 32 台在线设备时：15 → 3 次请求，20 → 2 次请求；每次往返约 150~600ms，
+# 少一次就少几百毫秒的显示延迟。
+_BATCH_SIZE = 20
+# 虚拟子设备的 did 后缀：<父did>.sN，N 为该路对应的 siid
+_SUB_DEVICE_SUFFIX = re.compile(r"\.s(\d+)$")
 # spec 并发拉取线程数；目标是 miot-spec.org 的独立请求，无会话竞争
 _SPEC_WORKERS = 8
 
@@ -372,29 +381,48 @@ class MijiaService:
         """
         return self.power_states([did]).get(did)
 
-    def toggle_power(self, did: str) -> bool:
-        """读取当前开关并取反写入，返回新状态。
+    def toggle_power(self, did: str, current: bool | None = None) -> bool:
+        """切换到开关的反面，返回新状态。
 
-        读与写必须串在同一任务里完成（调用方经单线程队列提交），
-        否则两次轮询之间会出现读后写的竞态。
+        `current` 是调用方已知的当前状态（界面层的开关记忆）：给了就
+        直接写反值，**省掉一次读往返**——米家云端单次往返 0.3~0.8 秒，
+        少一次就能让点击明显更跟手。
+
+        不给 `current` 时退回"先读后写"，读与写串在同一任务里完成
+        （调用方经单线程队列提交），否则两次轮询之间会出现读后写的竞态。
         """
-        current = self.power_state(did)
+        if current is None:
+            current = self.power_state(did)
         if current is None:
             raise ServiceError("设备不支持开关控制或已离线")
         new_state = not current
         self.set_power_state(did, new_state)
         return new_state
 
+    @staticmethod
+    def _parent_did(did: str) -> str | None:
+        """虚拟子设备 did → 父设备 did；不是子设备返回 None。
+
+        `1234567890.s3` → `1234567890`；普通 did 原样返回 None。
+        """
+        m = _SUB_DEVICE_SUFFIX.search(str(did))
+        return str(did)[:m.start()] if m else None
+
     def set_power_state(self, did: str, state: bool) -> None:
         """写入开关状态：spec method 直接构造批量写请求。
 
         不经 mijiaDevice.set——那条路要构造设备对象并逐属性写入，
         首次点击要等两三次网络往返；直写批量接口一次请求完成。
+        子设备的请求实际发往父 did（见 `_switch_target`），且不再试探
+        子 did：那样每次都会白等约 6 秒才拿到拒绝。
         """
         info = self._specs_for([did]).get(did)
-        method = self._find_on_method(info) if info else None
+        method = self._find_on_method(info, did) if info else None
         if method is None:
             raise ServiceError("设备不支持开关控制")
+        self._write_power(self._switch_target(did), method, state)
+
+    def _write_power(self, did: str, method: dict, state: bool) -> None:
         try:
             rets = self._api.set_devices_prop(
                 [{"did": did, **method, "value": state}]
@@ -420,32 +448,105 @@ class MijiaService:
         三段式压缩网络开销：did->model 映射增量补齐（一次设备列表）、
         spec 线程池并发拉取（本地文件缓存后零开销）、属性按批合并
         读取。全部命中缓存时整批设备只剩一两次属性请求。
+
+        虚拟子设备（`<父did>.sN`）的请求目标见 `_switch_target`：
+        实测米家云端**只认父 did + 该路 siid**，子 did 一律返回
+        -704083036，所以学到之后直接用父 did，不再每次白跑一次失败请求。
         """
         spec_map = self._specs_for(dids)
 
         queries: list[dict] = []
+        owners: list[str] = []          # 与 queries 一一对应：发起请求的设备 did
         result: dict[str, bool | None] = {}
+        method_of: dict[str, dict] = {}
+        target_of: dict[str, str] = {}
         for did in dids:
             info = spec_map.get(did)
-            method = self._find_on_method(info) if info else None
+            method = self._find_on_method(info, did) if info else None
             if method is None:
                 # spec 缺失或无开关属性，直接记为无能力
                 result[did] = None
-            else:
-                queries.append({"did": did, **method})
+                entry = self._device_index.get(did, ("", "", ""))
+                self._log_switch_failure(
+                    did, None, None,
+                    "规格无 on 属性或规格未取到（spec_type=%r）"
+                    % (entry[1] if len(entry) > 1 else ""))
+                continue
+            method_of[did] = method
+            target = self._switch_target(did)
+            target_of[did] = target
+            queries.append({"did": target, **method})
+            owners.append(did)
 
+        failed: list[str] = []
         for start in range(0, len(queries), _BATCH_SIZE):
             batch = queries[start:start + _BATCH_SIZE]
+            batch_owners = owners[start:start + _BATCH_SIZE]
             try:
                 rets = self._api.get_devices_prop(batch)
             except Exception as exc:
                 raise _wrap_error(exc, "批量读取设备状态失败") from exc
-            for item in rets:
-                did = str(item.get("did"))
-                # code 非 0 多为设备离线，视为状态未知而非无能力；
-                # 这里同样记 None：按钮隐藏，下轮轮询会再尝试
-                result[did] = bool(item["value"]) if item.get("code") == 0 else None
+            # 响应按 (did, siid) 回填：同一父设备的多路共用一个 did，
+            # 只按 did 匹配会把三路结果全算到最后一路
+            by_key = {(str(item.get("did")), item.get("siid")): item
+                      for item in rets if isinstance(item, dict)}
+            for index, owner in enumerate(batch_owners):
+                method = method_of[owner]
+                item = by_key.get((target_of[owner], method.get("siid")))
+                if item is None and index < len(rets) and isinstance(rets[index], dict):
+                    item = rets[index]          # 响应缺 siid 时按顺序对齐
+                if item is not None and item.get("code") == 0:
+                    result[owner] = bool(item["value"])
+                else:
+                    # 读失败（离线 / 该路被拒）不能记成 None——None 的语义是
+                    # "确认没有开关能力"，一旦落进记忆，这台设备就再也不会
+                    # 被轮询（force=True 会跳过 None），按钮永久消失。
+                    # 这里只把它列进待兜底清单，兜底仍失败就不写进结果。
+                    failed.append(owner)
+
+        # 读不到的逐台留一次线索（不按轮询刷屏）
+        for did in failed:
+            if result.get(did) is None:
+                self._log_switch_failure(
+                    did, method_of.get(did), None, "读取失败")
         return result
+
+    # ---------- 虚拟子设备的请求目标 ----------
+
+    def _switch_target(self, did: str) -> str:
+        """这条开关请求实际发给谁：子设备一律发给父设备。
+
+        实测（2026-10-18，真实账号）：云端对子 did（`<父did>.sN`）的读取
+        **不是快速报错，而是拖到 ~6 秒才返回 -704083036**；而父 did + 该路
+        siid 只要 ~50ms。所以"先试子 did、失败再退回父 did"的做法会让
+        每次启动后的首轮轮询白等 6 秒——这是子设备状态显示延迟的主因。
+
+        既然父 did 才是唯一可用入口，就直接走父 did，不再试探。
+        若将来某厂商云端只认子 did，只需把这里改成返回 `did`。
+        """
+        parent = self._parent_did(did)
+        return parent if parent is not None else did
+
+    def _log_switch_failure(self, did: str, method: dict | None,
+                            item: dict | None, stage: str) -> None:
+        """同一台设备只记一次失败详情，避免 5 秒轮询把日志刷满。"""
+        logged = getattr(self, "_switch_diag_logged", None)
+        if logged is None:
+            logged = set()
+            self._switch_diag_logged = logged
+        if did in logged:
+            return
+        logged.add(did)
+        entry = self._device_index.get(did, ("", "", ""))
+        method = method or {}
+        code = item.get("code") if isinstance(item, dict) else None
+        message = item.get("message") if isinstance(item, dict) else None
+        logger.warning(
+            "开关状态读取失败 did=%s name=%r model=%r spec_type=%r "
+            "siid=%s piid=%s 阶段=%s code=%s message=%s",
+            did, entry[2] if len(entry) > 2 else "", entry[0] if entry else "",
+            entry[1] if len(entry) > 1 else "",
+            method.get("siid"), method.get("piid"), stage, code, message)
 
     def _fetch_spec(self, spec_type: str, cache_dir) -> dict | None:
         if not spec_type:
@@ -474,14 +575,43 @@ class MijiaService:
         return info
 
     @staticmethod
-    def _find_on_method(info: dict) -> dict | None:
-        for prop in info.get("properties", []):
-            if prop.get("type") == "bool" and "w" in prop.get("rw", "") and (
-                prop["name"] == "on"
-                or prop["name"].replace("_", "-").startswith("on-")
-            ):
-                return prop["method"]
-        return None
+    def _gang_from_did(did: str) -> int | None:
+        """从虚拟子设备的 did 里取出它对应的通道号（siid）。
+
+        多键面板在云端会派生出虚拟设备，did 形如 `<父did>.s2`、`.s3`、
+        `.s4`——后缀的 N 就是这一路在规格里对应的 siid。单键设备与父
+        设备本身没有后缀，返回 None（按第一条 on 属性处理）。
+        """
+        m = _SUB_DEVICE_SUFFIX.search(str(did))
+        return int(m.group(1)) if m else None
+
+    @classmethod
+    def _find_on_method(cls, info: dict, did: str | None = None) -> dict | None:
+        """挑出该设备可写的 on 属性，返回其 method(siid/piid)。
+
+        多键面板的规格里有 `on-2`(siid 2)、`on-3`(siid 3)、`on-4`(siid 4)
+        等多路属性。**必须按 did 后缀选对应的那一路**：三个虚拟设备都
+        取第一条的话，后两路永远在控制第一路（用户表现为"虚拟设备点不
+        动/开关错灯"）。
+        """
+        props = [
+            prop for prop in info.get("properties", [])
+            if prop.get("type") == "bool" and "w" in prop.get("rw", "")
+            and (prop.get("name") == "on"
+                 or prop["name"].replace("_", "-").startswith("on-"))
+        ]
+        if not props:
+            return None
+        gang = cls._gang_from_did(did) if did else None
+        if gang is not None:
+            for prop in props:
+                if prop.get("method", {}).get("siid") == gang:
+                    return prop["method"]
+            # 后缀编号与 siid 对不上时按顺序兜底：s2→第 1 路、s3→第 2 路…
+            index = gang - 2
+            if 0 <= index < len(props):
+                return props[index]["method"]
+        return props[0]["method"]
 
     # ---------- 环境读数（卡片副标题展示用） ----------
 

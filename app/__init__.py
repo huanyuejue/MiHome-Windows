@@ -5,10 +5,42 @@
 # 本程序为自由软件，基于 GPL-3.0 或更高版本发布；在遵守许可证的前提下，
 # 你可以自由使用、修改和再分发它。本程序不含任何担保，详见 LICENSE 文件。
 
-__version__ = "0.3.0"
+__version__ = "0.3.4"
 
+import logging
 import sys
 from pathlib import Path
+
+
+def setup_logging(level: int = logging.INFO) -> Path | None:
+    """把日志落到数据目录的 debug.log，并返回该路径。
+
+    为什么必须有：`run.py` 在运行期会隐藏控制台，槽函数里抛的异常、
+    后台任务的失败、云端返回的错误码，全都打到一个看不见的 stderr 上，
+    排查问题时等于没有线索。写到文件里，用户只要把 log 发出来就能定位。
+
+    打包形态与源码形态各自落在自己的数据目录（见 _json_store.data_dir）：
+    源码模式在项目根，构建版在 %LOCALAPPDATA%\\MiHome-Windows\\。
+    """
+    from app.core import _json_store
+
+    path = _json_store.data_file("debug.log")
+    root = logging.getLogger()
+    # 重复调用（如自重启）不叠加 handler，否则每条日志写两遍
+    for handler in list(root.handlers):
+        if getattr(handler, "_mihome_file", False):
+            return path
+    try:
+        handler = logging.FileHandler(path, encoding="utf-8")
+    except OSError:
+        return None
+    handler._mihome_file = True  # type: ignore[attr-defined]
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"))
+    root.addHandler(handler)
+    root.setLevel(min(level, root.level or level))
+    return path
 
 
 def is_packaged() -> bool:

@@ -9,7 +9,7 @@
 定位面板。
 """
 
-from PySide6.QtCore import QPropertyAnimation, Qt
+from PySide6.QtCore import QPropertyAnimation, QTimer, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QFrame, QPushButton
 from app.ui.si_theme import SiColors
@@ -89,6 +89,18 @@ class OverlayDialog(QDialog):
         anim.setEndValue(1.0)
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
         self._fade_anim = anim
+        # 兜底：淡入依赖动画真正跑起来。若动画因窗口管理器/合成器原因
+        # 没执行，窗口会永远停在全透明状态——表现为"对话框打不开"。
+        # 400ms 后强制复位为不透明（正在淡出时不动，避免打架）。
+        QTimer.singleShot(400, self._ensure_visible_opacity)
+
+    def _ensure_visible_opacity(self) -> None:
+        import shiboken6
+
+        if not shiboken6.isValid(self) or self._closing:
+            return
+        if self.windowOpacity() < 0.99:
+            self.setWindowOpacity(1.0)
 
     def retheme(self) -> None:
         """主题切换：重设面板底色（子类覆写以扩展各自内联样式刷新）。

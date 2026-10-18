@@ -54,6 +54,9 @@ def _apply_ui_scale_env() -> None:
 
 
 def main() -> int:
+    # 日志先落地：控制台在运行期是隐藏的，异常与失败只能靠文件留存
+    from app import setup_logging
+    setup_logging()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     _apply_ui_scale_env()

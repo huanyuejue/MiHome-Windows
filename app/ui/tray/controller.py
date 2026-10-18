@@ -43,6 +43,18 @@ class TrayController:
         act_manage = QAction("管理托盘项目", menu)
         act_manage.triggered.connect(self._emit_manage)
         menu.addAction(act_manage)
+        act_schedule = QAction("定时任务", menu)
+        act_schedule.triggered.connect(self._on_schedules)
+        menu.addAction(act_schedule)
+        # 桌面挂件：显示/隐藏 + 管理 两条并列，入口放一起，
+        # 用户不必先找到主窗口
+        act_board = QAction("显示桌面挂件", menu)
+        act_board.triggered.connect(self._on_toggle_board)
+        menu.addAction(act_board)
+        self._board_action = act_board
+        act_board_manage = QAction("管理桌面挂件", menu)
+        act_board_manage.triggered.connect(self._on_manage_board)
+        menu.addAction(act_board_manage)
         act_settings = QAction("设置", menu)
         act_settings.triggered.connect(self._on_settings)
         menu.addAction(act_settings)
@@ -50,6 +62,9 @@ class TrayController:
         act_quit = QAction("退出", menu)
         act_quit.triggered.connect(self._quit)
         menu.addAction(act_quit)
+        # 每次弹出前刷新挂件菜单文案：窗口可能被挂件自己的 × 按钮关掉，
+        # 菜单若一直写「显示」会与实际状态不符
+        menu.aboutToShow.connect(self._refresh_board_action)
         self._tray.setContextMenu(menu)
 
         # 快捷窗口的信号接线统一在 _create_quick_window 内做一次，
@@ -133,6 +148,32 @@ class TrayController:
 
     def _on_manage(self) -> None:
         self._main.show_tray_manager()
+
+    def _on_schedules(self) -> None:
+        self._main.show_schedules()
+
+    # ---- 桌面挂件 ----
+
+    def _on_toggle_board(self) -> None:
+        """托盘菜单「桌面挂件」：已显示则隐藏，未显示则显示。"""
+        if self._board_visible():
+            self._main.hide_board()
+        else:
+            self._main.show_board()
+        self._refresh_board_action()
+
+    def _board_visible(self) -> bool:
+        board = getattr(self._main, "_board", None)
+        return board is not None and board.isVisible()
+
+    def _refresh_board_action(self) -> None:
+        """菜单文案跟随挂件实际状态，避免"显示"点了却是隐藏。"""
+        if self._board_action is not None:
+            self._board_action.setText(
+                "隐藏桌面挂件" if self._board_visible() else "显示桌面挂件")
+
+    def _on_manage_board(self) -> None:
+        self._main.show_board_manager()
 
     def _on_settings(self) -> None:
         self._main.show_settings()

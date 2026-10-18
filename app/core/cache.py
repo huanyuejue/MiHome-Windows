@@ -13,9 +13,14 @@ import json
 from app.core import _json_store
 from app.core.models import DeviceInfo
 
+# 版本 3：修正多键面板虚拟子设备的开关记忆。
+# 旧版把"读不到状态"也记成 None（None 的语义是"确认无开关能力"），
+# 这类设备会被轮询永久跳过——表现为子设备卡片永远没有开关按钮。
+# 作废一次缓存，让所有设备的开关状态重新探测一遍。
+#
 # 版本 2：DeviceInfo 增加 spec_type 字段（上游 5.x 起按规格 URN 拉 spec）；
-# 旧版缓存缺该字段会让“隐藏无功能设备”误判，直接作废重新拉取
-_CACHE_VERSION = 2
+# 旧版缓存缺该字段会让"隐藏无功能设备"误判，直接作废重新拉取
+_CACHE_VERSION = 3
 _FILENAME = "devices_cache.json"
 
 

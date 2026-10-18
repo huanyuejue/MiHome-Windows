@@ -10,9 +10,12 @@
 """
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
 
 _APP_DIR_NAME = "MiHome-Windows"
 # 旧版写在 exe 同目录的全部数据文件，发现即迁移
@@ -21,8 +24,17 @@ _migrated = False
 
 
 def data_dir() -> Path:
+    """配置与缓存的存放目录。
+
+    优先级：环境变量 `MIHOME_DATA_DIR` > 构建版数据目录 > 项目根。
+    环境变量是给**测试**用的：测试会反复写空配置，若落到真实数据目录
+    就会把用户的挂件设备、定时规则、托盘配置全部清空（曾真实发生过）。
+    """
     from app import is_packaged
 
+    override = os.environ.get("MIHOME_DATA_DIR")
+    if override:
+        return Path(override)
     if is_packaged():
         return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / _APP_DIR_NAME
     return Path(__file__).resolve().parents[2]
@@ -66,12 +78,16 @@ def read_json(path: Path, default: dict) -> dict:
 
 
 def write_json(path: Path, data: dict) -> None:
-    """原子写入：先写同目录临时文件再 os.replace，进程被杀不会留半截文件。"""
+    """原子写入：先写同目录临时文件再 os.replace，进程被杀不会留半截文件。
+
+    失败不再静默：写不进去意味着用户刚做的设置会凭空消失（曾表现为
+    "每次启动都丢配置"），必须留下日志线索。
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(
             json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(tmp, path)
-    except OSError:
-        pass
+    except OSError as exc:
+        _logger.warning("写入配置失败 %s: %s（本次改动不会保存）", path, exc)

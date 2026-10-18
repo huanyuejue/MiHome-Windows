@@ -13,6 +13,7 @@ import ctypes
 import ctypes.wintypes as wintypes
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import shiboken6
@@ -38,17 +39,21 @@ from app.siui.components.button import SiToggleButtonRefactor
 import qtawesome as qta
 
 from app.core import cache as device_cache
-from app.core import icon_store
-from app.core.jobs import JobExecutor
+from app.core import icon_store, schedule_store
+from app.core.jobs import PRIORITY_CONTROL, PRIORITY_IDLE, JobExecutor
 from app.core.models import DeviceInfo, SceneInfo, is_speaker
+from app.core.scheduler import Scheduler
 from app.core.service import MijiaService
+from app.ui.board_manager import BoardManagerDialog
 from app.ui.device_card import DeviceCard
 from app.ui.device_dialog import DeviceDetailDialog
 from app.ui.scene_card import SceneCard
+from app.ui.schedule_dialog import ScheduleDialog
 from app.ui.si_theme import SiColors, themed_tab_button
 from app.ui.toast import Toast
 from app.ui.tray import TrayController, TrayManagerDialog
 from app.ui.voice_fab import VoiceFab
+from app.ui.widgets_board import WidgetsBoard
 from app.ui.settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
@@ -58,9 +63,13 @@ _ALL_HOMES = "全部"
 # 场景选项卡：位于「全屋」左侧的特殊房间值，选中后网格切换为场景视图
 _SCENE_TAB = "场景"
 
-# 外部（APP/语音）改状态后卡片靠轮询跟随；批量读一次请求
-_POLL_INTERVAL_MS = 5_000
+# 外部（APP/语音/物理按键）改状态后卡片靠轮询跟随。
+# 3 秒：一次整批读约 0.3~0.8 秒（批次已提到 20 台/次），加上间隔后
+# 状态最迟约 4 秒内跟上；5 秒时代码体验上就是"按了墙上的开关，屏幕半天不动"。
+_POLL_INTERVAL_MS = 3_000
 _METRICS_INTERVAL_MS = 5 * 60 * 1000
+# 定时任务的扫描间隔：10 秒足以落在目标分钟内，又不会空转太频繁
+_SCHEDULE_INTERVAL_MS = 10_000
 
 
 def _refresh_summary(total: int, added: int, removed: int) -> str:
@@ -96,6 +105,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._service = MijiaService()
         self._jobs = JobExecutor(self)
+        # 第二条后台线程：只跑「纯 requests 的外部网页抓取」（产品页中文名、
+        # 图标图片下载）。它们慢（实测单个产品页 2.4 秒、超时 30 秒）且与
+        # 设备控制无关，留在主队列里会把用户点的开关堵在后面——这正是
+        # 「点开关半天没反应」的根因。这些调用用的是模块级 requests
+        # 而非上游共享 Session，分线程不违反线程安全前提。
+        self._web_jobs = JobExecutor(self)
 
         from app import resource_path
         self.setWindowIcon(QIcon(str(resource_path("app/ui/icon.png"))))
@@ -110,6 +125,9 @@ class MainWindow(QMainWindow):
 
         self._all_devices: list[DeviceInfo] = []
         self._cards: dict[str, DeviceCard] = {}
+        # did -> 本地操作版本号：每次用户/定时改这台设备的开关就 +1，
+        # 用来丢弃"操作之前发出、操作之后才回来"的轮询结果
+        self._power_gen: dict[str, int] = {}
         self._homes: list[str] = []
         self._current_home: str = ""
         self._current_room = _ALL_ROOMS
@@ -145,6 +163,9 @@ class MainWindow(QMainWindow):
         self._loading_scenes = False
         # 产品页名称回退的异步查询防重入
         self._localize_busy = False
+        # 已尝试过产品页查询的型号：失败后不再每 5 秒重试（实测该站点
+        # 单次 2.4 秒，网络差时重试会把控制队列灌满）
+        self._localize_attempted: set[str] = set()
         # DPI 变化时恢复期望逻辑尺寸：Qt 在缩放变化后保持物理尺寸
         # （逻辑尺寸被重算），窗口会显得偏大且底部留白；这里记住
         # 用户视角的逻辑尺寸，变化后恢复，让窗口跟随元素一起缩放
@@ -161,6 +182,16 @@ class MainWindow(QMainWindow):
         self._metrics_timer.setInterval(_METRICS_INTERVAL_MS)
         self._metrics_timer.timeout.connect(self._refresh_metrics)
         self._metrics_timer.timeout.connect(self._push_tray_metrics)
+        # 定时开关：10 秒扫一次，够在目标分钟那一分钟内触发；
+        # 判定只认"正点那一分钟"，错过的时刻不补执行（见 core/scheduler.py）
+        self._scheduler = Scheduler()
+        self._schedule_dialog: ScheduleDialog | None = None
+        # 正在执行中的规则 id：一次 tick 到下一次 tick 之间避免重复提交
+        self._schedule_pending: set[str] = set()
+        self._schedule_started = False
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setInterval(_SCHEDULE_INTERVAL_MS)
+        self._schedule_timer.timeout.connect(self._on_schedule_tick)
 
         # 右下角小爱语音悬浮球：设备列表里存在小爱音箱才显示
         self._voice_fab = VoiceFab(self)
@@ -187,6 +218,19 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             print(f"[Tray] 创建失败: {e}")
             self._tray = None
+
+        # 桌面挂件：常驻桌面的设备控制板，与托盘快捷窗口并列的独立入口。
+        # 构造失败不得影响主流程（挂件是增强功能，缺失只少个面板）
+        self._board_manager: BoardManagerDialog | None = None
+        try:
+            self._board = WidgetsBoard(self._service, self._jobs, None)
+            self._board.manage_requested.connect(self.show_board_manager)
+            self._board.open_device_requested.connect(self._on_open_device)
+            # 挂件内开关后回传，保持主界面卡片与开关记忆一致
+            self._board.power_changed.connect(self._on_board_power_changed)
+        except Exception as e:
+            logger.warning("桌面挂件创建失败: %s", e)
+            self._board = None
 
         root = QVBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
@@ -221,6 +265,9 @@ class MainWindow(QMainWindow):
         self._refresh_action.triggered.connect(self.load_devices)
         self._more_menu.addAction(self._refresh_action)
         self._more_menu.addAction("托盘管理").triggered.connect(self.show_tray_manager)
+        self._more_menu.addAction("定时任务").triggered.connect(self.show_schedules)
+        self._more_menu.addAction("桌面挂件").triggered.connect(self.show_board)
+        self._more_menu.addAction("管理桌面挂件").triggered.connect(self.show_board_manager)
         self._more_menu.addAction("设置").triggered.connect(self.show_settings)
         # 「关于」固定在菜单最底部
         self._more_menu.addSeparator()
@@ -328,6 +375,12 @@ class MainWindow(QMainWindow):
             self._tray.retheme()
             self._update_tray_devices()
             self._push_tray_metrics()
+        if self._board is not None:
+            self._board.retheme()
+        # 打开中的挂件管理对话框（内联样式为构造期求值）同步刷新
+        bdlg = self._board_manager
+        if bdlg is not None and shiboken6.isValid(bdlg) and bdlg.isVisible():
+            bdlg.retheme()
         # 打开中的设置页自身也刷新（其样式为构造时求值的内联样式）
         dlg = self._settings_dialog
         if dlg is not None and shiboken6.isValid(dlg) and dlg.isVisible():
@@ -517,10 +570,22 @@ class MainWindow(QMainWindow):
         if logged_in:
             self._startup_load()
             return
+        # 关键：不能在这个回调里直接开模态登录窗。
+        # 本函数是 JobExecutor 投递结果的回调（运行在投递定时器的栈上），
+        # 而模态窗的 exec() 会在里面再跑一层事件循环；此时「取二维码」这个
+        # 新任务虽然被 worker 执行完了，结果却要靠同一个投递定时器送到界面，
+        # 而那个定时器正被挡在栈上 —— 于是扫码页永远停在「正在获取登录二维码…」。
+        # 先把手交还给事件循环，下一拍再开窗。
+        from PySide6.QtCore import QTimer as _QTimer
+
+        _QTimer.singleShot(0, self, self._open_login_dialog)
+
+    def _open_login_dialog(self) -> None:
         # 惰性导入：qrcode 连带 PIL 约 15MB，仅在真正需要扫码时加载；
         # 凭据缓存的绝大多数会话永远走不到这里
         from app.ui.login_dialog import LoginDialog
 
+        logger.info("未登录：打开扫码登录窗口")
         dialog = LoginDialog(self._service, self._jobs, self)
         if dialog.exec_and_wait() == LoginDialog.Accepted:
             self._startup_load()
@@ -536,6 +601,7 @@ class MainWindow(QMainWindow):
         """
         self._poll_timer.start()
         self._metrics_timer.start()
+        self._start_scheduler()
         cached = device_cache.load()
         if cached is None:
             self.load_devices()
@@ -545,6 +611,152 @@ class MainWindow(QMainWindow):
         self._metrics.update(metrics)
         self._show_status("已从本地缓存加载，点击右上角菜单刷新可同步最新设备")
         self._apply_devices(devices)
+        self._apply_board_autostart()
+
+    def _apply_board_autostart(self) -> None:
+        """按设置决定挂件是否在设备就绪后自动显示。
+
+        独立于托盘的「启动时最小化到托盘」开关：托盘管的是主窗口怎么
+        起步，挂件管的是桌面是否多一块面板，两者互不覆盖。
+        """
+        if self._board is None:
+            return
+        from app.core import board_store
+        # 勾了「启动时显示」就强制显示；没勾则恢复上次状态
+        # （用户上次关着 → 不弹；上次开着 → 继续开着）
+        if board_store.get_autostart() or board_store.get_visible():
+            self.show_board()
+        else:
+            self._board.hide()
+
+    # ---------- 定时任务 ----------
+
+    def _start_scheduler(self) -> None:
+        """登录完成、服务可用后启动定时扫描。
+
+        启动瞬间先跑一次 tick：这样「此刻正好是 7:00」时建立的规则
+        也能立刻生效，不必等到下一个 10 秒周期。
+        """
+        if self._schedule_started:
+            return
+        self._schedule_started = True
+        self._reload_schedules()
+        self._schedule_timer.start()
+        # 设备列表还没载入时不跑首次 tick：此刻报"错过"只能显示 did 后六位，
+        # 也分不清设备是否已被移除。等 10 秒后的常规 tick 即可。
+        if self._all_devices:
+            self._on_schedule_tick()
+
+    def _reload_schedules(self) -> None:
+        """把磁盘上的规则读进调度器（对话框里增删/启停后调用）。"""
+        self._scheduler.set_rules(schedule_store.load())
+
+    def _on_schedule_tick(self) -> None:
+        """定时器回调：执行到点的规则，并播报今天错过的规则。"""
+        result = self._scheduler.tick()
+        for rule in result.missed:
+            device = next((d for d in self._all_devices if d.did == rule["did"]), None)
+            name = device.name if device is not None else rule["did"][-6:]
+            logger.info("定时任务已错过（不补执行）: %s %s", name, rule["time"])
+        if result.missed:
+            names = "、".join(
+                next((d.name for d in self._all_devices if d.did == r["did"]),
+                     r["did"][-6:])
+                for r in result.missed[:3]
+            )
+            more = "" if len(result.missed) <= 3 else f" 等 {len(result.missed)} 条"
+            Toast.info(
+                self,
+                f"今天已错过定时：{names}{more}（错过的时刻不补执行）",
+                5000,
+            )
+        for rule in result.due:
+            self._run_schedule_rule(rule)
+
+    def _run_schedule_rule(self, rule: dict) -> None:
+        """把一条到点规则写进控制队列；成功后落 last_fired 防同日重复。"""
+        rule_id = str(rule.get("id", ""))
+        if rule_id in self._schedule_pending:
+            return
+        self._schedule_pending.add(rule_id)
+        did = rule["did"]
+        turn_on = rule["action"] == "on"
+        device = next((d for d in self._all_devices if d.did == did), None)
+        if self._all_devices and device is None:
+            # 设备已从账号里移除：规则保留但不执行，与对话框里的提示一致。
+            # 不 mark_fired，用户把规则改到别的设备后当天仍可生效。
+            logger.info("定时规则指向的设备已不存在，跳过: %s", did)
+            self._schedule_pending.discard(rule_id)
+            return
+        name = device.name if device is not None else did[-6:]
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        def _on_success(_result=None, rid=rule_id, d=did, on=turn_on,
+                        rname=name, at=rule["time"], date_text=today):
+            self._schedule_pending.discard(rid)
+            schedule_store.mark_fired(rid, date_text)
+            self._scheduler.mark_fired(rid)
+            self._apply_scheduled_state(d, on)
+            Toast.info(self, f"已按定时{'打开' if on else '关闭'}「{rname}」（{at}）", 3000)
+
+        def _on_error(error, rid=rule_id, rname=name, at=rule["time"]):
+            self._schedule_pending.discard(rid)
+            logger.warning("定时任务执行失败 %s %s: %s", rname, at, error)
+            Toast.info(self, f"定时执行失败「{rname}」（{at}）：{error}", 5000)
+
+        self._jobs.submit(
+            lambda d=did, on=turn_on: self._service.set_power_state(d, on),
+            on_success=_on_success,
+            on_error=_on_error,
+            priority=PRIORITY_CONTROL,
+        )
+
+    def _apply_scheduled_state(self, did: str, turn_on: bool) -> None:
+        """定时执行成功后同步三处界面：主界面卡片、托盘、桌面挂件。"""
+        # 定时也算"本地操作"：在途轮询读到的是执行前的旧值，必须丢弃
+        self._bump_power_gen(did)
+        self._known_power[did] = turn_on
+        card = self._cards.get(did)
+        if card is not None and shiboken6.isValid(card):
+            card.set_power_state(turn_on)
+        try:
+            self._update_tray_devices()
+        except Exception:
+            pass
+        if self._board is not None:
+            try:
+                self._board.apply_power_states({did: turn_on})
+            except Exception:
+                pass
+
+    def show_schedules(self) -> None:
+        """打开定时任务对话框（托盘菜单与更多菜单共用入口）。"""
+        dlg = self._schedule_dialog
+        if dlg is not None and shiboken6.isValid(dlg) and dlg.isVisible():
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        try:
+            # 最小化到任务栏时 isHidden() 为 False，但以它为父窗口会让
+            # 对话框跟着最小化、看起来"没打开"；故一并判断 isMinimized
+            parent = None if (self.isHidden() or self.isMinimized()) else self
+            dlg = ScheduleDialog(self._all_devices, parent)
+            self._schedule_dialog = dlg
+            dlg.rules_changed.connect(self._reload_schedules)
+            dlg.exec()
+        except Exception as exc:  # 打不开时把原因摆到用户面前，别静默失败
+            self._schedule_dialog = None
+            logger.exception("打开定时任务对话框失败")
+            QMessageBox.warning(
+                self, "定时任务打不开",
+                f"打开定时任务面板失败：{exc}\n\n详细信息见 debug.log。")
+            return
+        finally:
+            if dlg is not None:
+                dlg.deleteLater()
+            self._schedule_dialog = None
+        # 对话框里可能删/停了规则，关掉后立刻重载，避免还在按旧规则触发
+        self._reload_schedules()
 
     def load_devices(self) -> None:
         if self._loading_devices:
@@ -567,6 +779,7 @@ class MainWindow(QMainWindow):
         added, removed = self._diff_devices(devices)
         self._apply_devices(devices)
         device_cache.save(devices, self._known_power, self._metrics)
+        self._apply_board_autostart()
         if self._all_devices or added or removed:
             Toast.info(self, _refresh_summary(len(devices), added, removed))
 
@@ -593,6 +806,7 @@ class MainWindow(QMainWindow):
         self._refresh_metrics()
         self._update_voice_fab()
         self._update_tray_devices()
+        self._update_board_devices()
         self._load_card_icons()
         # 场景入口开启时启动即预取场景列表，进场景页无需等待
         if self._show_scene_tab:
@@ -613,6 +827,7 @@ class MainWindow(QMainWindow):
         self._jobs.submit(
             lambda m=models: self._service.icon_urls(m),
             on_success=self._on_icons_ready,
+            priority=PRIORITY_IDLE,
         )
 
     def _on_icons_ready(self, urls: dict[str, str | None]) -> None:
@@ -622,10 +837,12 @@ class MainWindow(QMainWindow):
                 continue
             if icon_store.icon_path(model).is_file():
                 continue
-            self._jobs.submit(
+            # 图片下载走 _web_jobs：单张最慢可到 15 秒超时，绝不能占控制队列
+            self._web_jobs.submit(
                 lambda m=model, u=url: self._service.icon_file(m, u),
                 on_success=lambda p, m=model: self._apply_card_icon(m, str(p))
                 if p else None,
+                priority=PRIORITY_IDLE,
             )
 
     def _apply_card_icon(self, model: str, path: str) -> None:
@@ -666,14 +883,19 @@ class MainWindow(QMainWindow):
             if self._apply_display_names(replacements):
                 return  # 已重建并同步托盘
         # 仍有未解析的型号 → 提交一次后台查询（防重入）
+        # 走 _web_jobs：产品页单次实测 2.4 秒、超时 30 秒，绝不能在
+        # 控制队列里跑；失败后也不再每 5 秒重试（见 _on_product_names_failed）
         pending = sorted({d.model for d in ascii_devices
-                          if not self._service.has_product_page_name(d.model)})
+                          if not self._service.has_product_page_name(d.model)
+                          and d.model not in self._localize_attempted})
         if pending and not self._localize_busy:
             self._localize_busy = True
-            self._jobs.submit(
+            self._localize_attempted.update(pending)
+            self._web_jobs.submit(
                 lambda: [self._service.product_page_name(m) for m in pending],
                 on_success=lambda _: self._on_product_names_fetched(),
                 on_error=lambda e: self._on_product_names_failed(e),
+                priority=PRIORITY_IDLE,
             )
 
     def _apply_display_names(self, replacements: dict[str, str]) -> bool:
@@ -711,6 +933,103 @@ class MainWindow(QMainWindow):
     def _update_tray_devices(self) -> None:
         if self._tray is not None:
             self._tray.set_devices(self._displayed_devices(), self._known_power)
+
+    def _update_board_devices(self) -> None:
+        """设备列表 / 开关状态变化后同步桌面挂件。
+
+        挂件用全量列表而非当前房间筛选后的列表：它是常驻面板，
+        不该随主界面的房间切换而增删卡片。
+        """
+        if self._board is not None:
+            try:
+                self._board.set_devices(self._all_devices, self._known_power)
+            except Exception:
+                logger.warning("同步挂件设备失败", exc_info=True)
+
+    # ---------- 桌面挂件 ----------
+
+    def show_board(self) -> None:
+        """显示桌面挂件（托盘菜单 / 管理对话框 / 设置开关共用入口）。"""
+        if self._board is None:
+            return
+        from app.core import board_store
+        # 记录"用户要让挂件开着"，重启后据此恢复
+        board_store.set_visible(True)
+        self._board.set_devices(self._all_devices, self._known_power)
+        self._board.show()
+        self._board.raise_()
+
+    def hide_board(self) -> None:
+        """隐藏挂件（托盘菜单 / 桌面挂件开关共用）。
+
+        这是用户主动动作，要记进 `visible`，重启后保持隐藏。
+        """
+        if self._board is not None:
+            from app.core import board_store
+            board_store.set_visible(False)
+            self._board.hide()
+
+    def toggle_board_collapse(self) -> None:
+        """托盘菜单「收起挂件」：折叠为细横条 / 已折叠则展开。"""
+        if self._board is None:
+            return
+        self.show_board()
+        self._board.toggle_collapse()
+
+    def show_board_manager(self) -> None:
+        """打开挂件设备管理对话框。
+
+        透明度与列数在对话框内即时预览到真实挂件窗口（所见即所得），
+        因此即使点「取消」，这两项的调整也已生效并落盘；「保存」只
+        决定设备清单与顺序是否写入。
+        """
+        if not self._all_devices:
+            Toast.info(self, "请先刷新获取设备列表", 2500)
+            return
+        # 单实例守卫：连点「+」会排队触发多次本函数，模态窗的 exec() 一旦
+        # 返回就再开一个，屏幕上便叠出好几个「管理桌面挂件」（用户实测反馈）
+        if self._board_manager is not None:
+            self._board_manager.raise_()
+            self._board_manager.activateWindow()
+            return
+        parent = None if self.isHidden() else self
+        dlg = BoardManagerDialog(self._all_devices, parent)
+        self._board_manager = dlg
+        dlg.opacity_preview.connect(self._on_board_opacity_preview)
+        dlg.columns_preview.connect(self._on_board_columns_preview)
+        dlg.background_preview.connect(self._on_board_background_preview)
+        dlg.topmost_preview.connect(self._on_board_topmost_preview)
+        # 对话框遮挡会让挂件暂停「悬停恢复不透明」，否则看不到透明度效果
+        if self._board is not None:
+            self._board.set_previewing(True)
+        result = dlg.exec()
+        dlg.deleteLater()
+        self._board_manager = None
+        if self._board is not None:
+            self._board.set_previewing(False)
+        if result == QDialog.Accepted:
+            from app.core import board_store
+            board_store.save_devices(dlg.selected_dids())
+            self._update_board_devices()
+            Toast.info(self, "挂件设备已更新", 2000)
+
+    def _on_board_opacity_preview(self, value: float) -> None:
+        # 落盘在对话框侧已完成，这里只负责让窗口实时可见
+        if self._board is not None:
+            self._board.set_opacity(value, persist=False)
+
+    def _on_board_columns_preview(self, value: int) -> None:
+        if self._board is not None:
+            self._board.set_columns(value)
+
+    def _on_board_background_preview(self, color) -> None:
+        # 落盘在对话框侧已完成，这里只让真实窗口立即换色
+        if self._board is not None:
+            self._board.set_bg(color, persist=False)
+
+    def _on_board_topmost_preview(self, topmost: bool) -> None:
+        if self._board is not None:
+            self._board.set_topmost(bool(topmost), persist=False)
 
     def _show_more_menu(self) -> None:
         """在更多按钮左下方弹出菜单，右边缘与按钮右边缘对齐。"""
@@ -912,9 +1231,12 @@ class MainWindow(QMainWindow):
             if not dids:
                 return
         self._poll_in_flight = True
+        # 快照"操作版本号"：轮询回来时若某台设备已被用户操作过，
+        # 说明这条结果比用户的操作旧，必须丢弃（见 _apply_power_states）
+        snapshot = dict(self._power_gen)
         self._jobs.submit(
             lambda: self._service.power_states(dids),
-            on_success=self._apply_power_states,
+            on_success=lambda states, snap=snapshot: self._apply_power_states(states, snap),
             on_error=self._on_poll_error,
         )
 
@@ -923,18 +1245,52 @@ class MainWindow(QMainWindow):
         self._poll_in_flight = False
         logger.warning("轮询设备开关状态失败: %s", error)
 
-    def _apply_power_states(self, states: dict[str, bool | None]) -> None:
+    def _bump_power_gen(self, did: str) -> None:
+        """标记这台设备的开关状态被"本地操作"改过。
+
+        用途：轮询是 5 秒一次的后台请求，点开关时可能已有一条旧结果在途。
+        它回来会把刚翻转的按钮覆盖回旧值（用户看到"绿一下又变灰，
+        过一会儿才真的变"）。子设备因为写入要两次请求（子 did 失败→父 did
+        重试）耗时更长，这个回弹特别明显。
+        """
+        self._power_gen[did] = self._power_gen.get(did, 0) + 1
+
+    def _on_board_power_changed(self, did: str, state) -> None:
+        """挂件里点了开关：先记版本号再回写，避免在途轮询把状态盖回去。"""
+        self._bump_power_gen(did)
+        self._apply_power_state(did, state)
+
+    def _apply_power_states(self, states: dict[str, bool | None],
+                            snapshot: dict[str, int] | None = None) -> None:
         self._poll_in_flight = False
+        stale = {did for did in states
+                 if snapshot is not None
+                 and snapshot.get(did, 0) != self._power_gen.get(did, 0)}
+        if stale:
+            # 这批结果里有些设备在请求发出后被操作过：丢弃它们的旧值，
+            # 别覆盖用户刚看到的状态
+            logger.debug("丢弃过期的开关轮询结果: %s", stale)
         for did, state in states.items():
+            if did in stale:
+                continue
             self._apply_power_state(did, state)
         self._maybe_localize_names()
         self._update_tray_devices()
+        # 挂件就地更新按钮状态（不整窗重建，避免每 5 秒一次重建抖动）
+        if self._board is not None:
+            try:
+                self._board.apply_power_states(
+                    {d: s for d, s in states.items() if d not in stale})
+            except Exception:
+                logger.warning("同步挂件开关状态失败", exc_info=True)
 
     def _apply_power_state(self, did: str, state: bool | None) -> None:
-        # 离线设备的开关值不落记忆，避免云端缓存的旧值覆盖灰置状态
+        # 离线设备的开关值不落记忆：云端返回的是最后一次在线时的缓存。
+        # 但也不能写成 None——None 表示"确认没有开关能力"，轮询会永久跳过
+        # 它，等设备重新上线也不会再探测，按钮就再也不出现了。
+        # 所以离线时直接不更新，保留上一次已知状态（卡片本就按离线灰置）。
         dev = next((d for d in self._all_devices if d.did == did), None)
         if dev is not None and not dev.online:
-            self._known_power[did] = None
             return
         self._known_power[did] = state
         card = self._cards.get(did)
@@ -978,12 +1334,17 @@ class MainWindow(QMainWindow):
         self._push_tray_metrics()
 
     def _push_tray_metrics(self) -> None:
-        """把温湿度读数同步给托盘快捷窗口（副标题展示）。"""
+        """把温湿度读数同步给托盘快捷窗口与桌面挂件（副标题展示）。"""
         if self._tray is not None:
             try:
                 self._tray.set_metrics(self._metrics)
             except Exception:
                 # 托盘行可能在重建间隙销毁，同步失败可安全忽略
+                pass
+        if self._board is not None:
+            try:
+                self._board.set_metrics(self._metrics)
+            except Exception:
                 pass
 
     def _on_detail_metrics(self, did: str, text: str) -> None:
@@ -1322,27 +1683,60 @@ class MainWindow(QMainWindow):
         card = self._cards.get(did)
         if card is None:
             return
+        current = self._known_power.get(did)
+        if current is None:
+            # 状态未知：只能让服务端读一次再写，仍按用户操作优先级排队
+            self._bump_power_gen(did)
+            card.set_busy(True)
+            self._jobs.submit(
+                lambda: self._service.toggle_power(did),
+                on_success=lambda new_state, c=card, d=did:
+                    self._on_power_done(c, d, new_state),
+                on_error=lambda err, c=card: self._on_power_failed(c, err),
+                priority=PRIORITY_CONTROL,
+            )
+            return
+        target = not current
+        # 乐观 UI：先翻转再发请求，失败回滚（见 _on_power_failed）
+        self._bump_power_gen(did)
+        self._known_power[did] = target
+        card.set_power_state(target)
         card.set_busy(True)
         self._jobs.submit(
-            lambda: self._service.toggle_power(did),
+            lambda: (self._service.set_power_state(did, target), target)[1],
             on_success=lambda new_state, c=card, d=did:
                 self._on_power_done(c, d, new_state),
-            on_error=lambda err, c=card: self._on_power_failed(c, err),
+            on_error=lambda err, c=card, d=did, prev=current:
+                self._on_power_failed(c, err, d, prev),
+            priority=PRIORITY_CONTROL,
         )
 
     def _on_power_done(self, card: DeviceCard, did: str, new_state: bool) -> None:
         # 卡片可能在任务排队期间随网格重建被销毁，回调前先确认存活
         if not shiboken6.isValid(card):
             return
+        self._bump_power_gen(did)
         card.set_busy(False)
         card.set_power_state(new_state)
         self._known_power[did] = new_state
         self._update_tray_devices()
+        if self._board is not None:
+            self._board.apply_power_states({did: new_state})
         Toast.info(
             self, f"已{'打开' if new_state else '关闭'}「{card.device.name}」", 2500
         )
 
-    def _on_power_failed(self, card: DeviceCard, error: Exception) -> None:
+    def _on_power_failed(self, card: DeviceCard, error: Exception,
+                         did: str | None = None,
+                         revert_to: bool | None = None) -> None:
+        # 乐观翻转失败要回滚，否则界面显示"已开"而设备实际没动
+        if did is not None and revert_to is not None:
+            self._bump_power_gen(did)
+            self._known_power[did] = revert_to
+            if shiboken6.isValid(card):
+                card.set_power_state(revert_to)
+            if self._board is not None:
+                self._board.apply_power_states({did: revert_to})
         if not shiboken6.isValid(card):
             return
         card.set_busy(False)
@@ -1455,7 +1849,19 @@ class MainWindow(QMainWindow):
                 self._tray._tray.hide()
             except Exception:
                 pass
+        # 桌面挂件：先把位置与透明度落盘再销毁，避免退出时丢摆放
+        if self._board is not None:
+            try:
+                self._board.hide()
+            except Exception:
+                pass
+        # 定时扫描随进程退出停止；规则本身已落盘，下次启动继续
+        try:
+            self._schedule_timer.stop()
+        except Exception:
+            pass
         self._jobs.shutdown()
+        self._web_jobs.shutdown()
         super().closeEvent(event)
         # quitOnLastWindowClosed 为 False（托盘常驻需要），关闭窗口不会自动
         # 退出事件循环；关闭托盘设置时需显式退出让进程真正结束

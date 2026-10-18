@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 import qtawesome as qta
 
 from app.core import settings_store, tray_store
-from app.core.jobs import JobExecutor
+from app.core.jobs import PRIORITY_CONTROL, JobExecutor
 from app.core.models import DeviceInfo, SceneInfo, is_speaker
 from app.core.service import MijiaService
 from app.ui.power_button import PowerButton
@@ -633,11 +633,18 @@ class TrayQuickWindow(QDialog):
             btn = PowerButton(28, icon_size=22)
             btn.set_state(known)
             def _on_toggle(checked=False, d=dev.did, b=btn):
+                # 已知状态直接写反值（省一次读往返）+ 立刻翻转按钮，
+                # 失败在回调里回滚：点击不再有"点了没反应"的空窗
+                target = not bool(self._known_power.get(d))
+                self._known_power[d] = target
+                b.set_state(target)
                 b.set_busy(True)
                 self._jobs.submit(
-                    lambda: self._service.toggle_power(d),
+                    lambda: (self._service.set_power_state(d, target), target)[1],
                     on_success=lambda ns, dd=d, bb=b: self._on_toggle_done(dd, ns, bb),
-                    on_error=lambda e, bb=b: bb.set_busy(False),
+                    on_error=lambda e, dd=d, bb=b, prev=(not target):
+                        self._on_toggle_failed(dd, prev, bb),
+                    priority=PRIORITY_CONTROL,
                 )
             btn.clicked.connect(_on_toggle)
             lay.addWidget(btn)
@@ -652,6 +659,15 @@ class TrayQuickWindow(QDialog):
         self._known_power[did] = ns
         btn.set_state(ns)
         btn.set_busy(False)
+
+    def _on_toggle_failed(self, did: str, revert_to: bool, btn) -> None:
+        """写入失败：回滚乐观翻转的按钮，不留假状态。"""
+        import shiboken6
+
+        self._known_power[did] = revert_to
+        if shiboken6.isValid(btn):
+            btn.set_state(revert_to)
+            btn.set_busy(False)
 
     # ---------- 场景行 ----------
 
