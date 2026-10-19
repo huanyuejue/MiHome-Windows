@@ -19,7 +19,7 @@
 """
 
 from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QPainter
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -179,6 +179,67 @@ def _qcolor(spec: str) -> QColor:
     return QColor(s)
 
 
+class _FloatingHint(QWidget):
+    """自绘的小提示窗（tooltip / 拖拽浮标共用）。
+
+    为什么不直接用 QLabel + 样式表：Qt 在「半透明顶层窗口」里对
+    QLabel 的样式表背景与 QToolTip 的绘制都不可控（实测拿到 alpha=0 或
+    落回系统深色样式，表现为黑底深字）。这里直接 paintEvent 画圆角矩形
+    与文字，配色由调用方给，任何主题下都是确定的像素。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(
+            parent,
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowTransparentForInput,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._text = ""
+        self._bg = QColor(30, 31, 36)
+        self._fg = QColor(232, 232, 234)
+        self._bd = QColor(53, 54, 63)
+        self._pad_x, self._pad_y, self._radius = 9, 5, 6
+
+    def set_colors(self, bg: str, fg: str, border: str) -> None:
+        self._bg = _qcolor(bg)
+        self._fg = _qcolor(fg)
+        self._bd = _qcolor(border)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (与 QLabel 同名，便于替换)
+        self._text = text or ""
+        self.adjustSize()
+        self.update()
+
+    def text(self) -> str:
+        return self._text
+
+    def sizeHint(self):  # noqa: N802
+        fm = self.fontMetrics()
+        width = fm.horizontalAdvance(self._text) + self._pad_x * 2 + 2
+        height = fm.height() + self._pad_y * 2 + 2
+        return QSize(max(20, width), max(16, height))
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, self._radius, self._radius)
+        painter.fillPath(path, self._bg)
+        painter.setPen(self._bd)
+        painter.drawPath(path)
+        painter.setPen(self._fg)
+        painter.drawText(
+            self.rect().adjusted(self._pad_x, self._pad_y, -self._pad_x, -self._pad_y),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            self._text,
+        )
+        painter.end()
+
+
 class _AggregateBar(QWidget):
     """折叠横条的聚合状态条：每台设备一段，按开 / 关 / 未知 / 离线着色。
 
@@ -283,6 +344,7 @@ class WidgetsBoard(QWidget):
         # 配色表：跟随主题或用户挑的固定色（见 _BoardPalette）
         self._palette = _BoardPalette(self._bg)
         self._build_ui()
+        self._install_hint_filters()
         # 锁定状态在构造期就生效：标题栏直接不建出来
         self._handle.setVisible(not self._locked)
         self._restore_geometry()
@@ -733,6 +795,42 @@ class WidgetsBoard(QWidget):
         self._rebuild()
         self._apply_opacity()
 
+    # ---------- 自绘悬浮提示 ----------
+
+    def _install_hint_filters(self) -> None:
+        """给所有带 tooltip 的子控件挂上事件过滤器，改用自绘提示。
+
+        原生 QToolTip 在挂件这种「半透明 + 多层自定义样式」的窗口里不可控：
+        实测它会被渲染成全透明（alpha=0）或落到系统深色样式上，出现黑底深字。
+        自绘一个 ToolTip 型小窗，配色完全由当前调色板决定，深浅主题都不会错。
+        """
+        for widget in self.findChildren(QWidget):
+            if widget is not self and widget.toolTip():
+                widget.installEventFilter(self)
+
+    def _ensure_hint(self):
+        hint = getattr(self, "_hint", None)
+        if hint is None:
+            hint = _FloatingHint(None)
+            hint.hide()
+            self._hint = hint
+        return hint
+
+    def _show_hint(self, text: str, global_pos) -> None:
+        hint = self._ensure_hint()
+        p = self._palette
+        hint.set_colors(p.window_bg, p.text_primary, p.line)
+        hint.setText(text)
+        hint.adjustSize()
+        hint.move(global_pos + QPoint(12, 18))
+        hint.show()
+        hint.raise_()
+
+    def _hide_hint(self) -> None:
+        hint = getattr(self, "_hint", None)
+        if hint is not None:
+            hint.hide()
+
     # ---------- 面板上拖拽排序 ----------
 
     def _card_drag_event(self, card, key: tuple[str, str], event) -> bool:
@@ -813,29 +911,17 @@ class WidgetsBoard(QWidget):
     def _ensure_drag_ghost(self):
         ghost = getattr(self, "_drag_ghost", None)
         if ghost is None:
-            from PySide6.QtWidgets import QLabel as _QLabel
-
-            ghost = _QLabel(
-                None,
-                Qt.WindowType.ToolTip
-                | Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.WindowTransparentForInput,
-            )
-            ghost.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-            ghost.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            ghost = _FloatingHint(None)
             ghost.hide()
             self._drag_ghost = ghost
         return ghost
 
     def _show_drag_ghost(self, text: str, global_pos) -> None:
-        """跟随光标的半透明"卡片影子"——拖动时唯一能立刻看见的反馈。"""
+        """跟随光标的"卡片影子"——拖动时唯一能立刻看见的反馈。"""
         ghost = self._ensure_drag_ghost()
         p = self._palette
+        ghost.set_colors(p.window_bg, p.text_primary, SiColors.THEME)
         ghost.setText(text)
-        ghost.setStyleSheet(
-            f"QLabel {{ background: {p.window_bg}; color: {p.text_primary};"
-            f" border: 1px solid {SiColors.THEME}; border-radius: 8px;"
-            " padding: 5px 10px; font-size: 9pt; }")
         ghost.adjustSize()
         ghost.move(global_pos + QPoint(14, 14))
         ghost.show()
@@ -1277,6 +1363,7 @@ class WidgetsBoard(QWidget):
         self._grid = grid
         self._list_lay.addLayout(grid)
         self._list_lay.addStretch(1)
+        self._install_hint_filters()
         if not self._collapsed:
             # 列数/设备数变化后重算尺寸并记住展开态几何（拖动位置保持不变）
             pos = self.geometry().topLeft()
@@ -1461,6 +1548,14 @@ class WidgetsBoard(QWidget):
             is_handle = handle is not None and obj is handle
             is_bar = bar is not None and obj is bar
             is_root = root is not None and obj is root
+            if event.type() == QEvent.Type.ToolTip:
+                text = obj.toolTip() if hasattr(obj, "toolTip") else ""
+                if text:
+                    self._show_hint(text, event.globalPos())
+                    return True
+                return False
+            if event.type() == QEvent.Type.Leave:
+                self._hide_hint()
             card_key = getattr(obj, "_reorder_key", None)
             if card_key is not None:
                 return self._card_drag_event(obj, card_key, event)
@@ -1557,6 +1652,7 @@ class WidgetsBoard(QWidget):
     def hideEvent(self, event) -> None:  # noqa: N802
         self._save_geometry()
         self._hide_drag_ghost()
+        self._hide_hint()
         super().hideEvent(event)
 
     def _show_context_menu(self, pos: QPoint) -> None:

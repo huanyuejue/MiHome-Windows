@@ -872,6 +872,35 @@ board_store.set_columns(3)
 board.set_columns(3)
 print("19. 面板卡片拖拽排序（锁定后禁用）OK")
 
+# ---------- 20. 自绘悬浮提示（替代原生 tooltip）----------
+from PySide6.QtGui import QHelpEvent
+
+board.set_bg(None)          # 跟随主题，配色由调色板决定
+board._rebuild()
+app.processEvents()
+lab = board._cards[devs[0].did]._name
+assert lab.toolTip(), "设备名应带 tooltip 文案"
+ev = QHelpEvent(QEvent.Type.ToolTip, QPoint(2, 2),
+                lab.mapToGlobal(lab.rect().center()))
+app.sendEvent(lab, ev)
+app.processEvents()
+hint = getattr(board, "_hint", None)
+assert hint is not None and hint.isVisible(), "悬浮提示未显示（自绘提示失效）"
+assert hint.text() == lab.toolTip(), f"提示文案不符: {hint.text()}"
+# 用 render() 取真实绘制像素（grab() 对半透明顶层窗口不可靠，恒为 alpha=0）
+from PySide6.QtGui import QImage
+
+img = QImage(hint.size(), QImage.Format.Format_ARGB32)
+img.fill(0)
+hint.render(img)
+bg = img.pixelColor(4, img.height() // 2)
+assert bg.alpha() == 255, f"提示背景不透明（会变成黑框）: {bg.name()}/a{bg.alpha()}"
+assert bg.name().upper() != "#000000", f"提示背景是纯黑: {bg.name()}"
+board._hide_hint()
+app.processEvents()
+assert not hint.isVisible(), "提示应在收起后隐藏"
+print("20. 自绘悬浮提示（不透明 + 主题配色）OK")
+
 # ---------- 收尾：清运行数据 ----------
 win._all_devices = []
 win._force_quit = True
