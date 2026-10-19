@@ -769,9 +769,12 @@ app.processEvents()
 h_unlocked = board.height()
 assert not board._handle.isHidden(), "未锁定时标题栏应可见"
 
-board.set_locked(True)
+# 标题栏上的「锁定」按钮：锁定入口不再藏在右键/托盘里
+assert hasattr(board, "_lock_toggle"), "标题栏缺少锁定按钮"
+assert not board._lock_toggle.isHidden(), "未锁定时标题栏锁定按钮应可见"
+board._lock_toggle.click()
 app.processEvents()
-assert board.is_locked() and board_store.get_locked(), "锁定状态未生效/未落盘"
+assert board.is_locked() and board_store.get_locked(), "点标题栏锁定按钮未生效/未落盘"
 assert board._handle.isHidden(), "锁定后标题栏应隐藏"
 assert board.height() < h_unlocked, \
     f"锁定后应少掉标题栏高度: {board.height()} vs {h_unlocked}"
@@ -805,6 +808,69 @@ dlg5.done(0)
 app.processEvents()
 board_store.set_locked(False)
 print("18. 锁定（隐藏标题栏 / 禁止收起 / 解锁 / 管理窗接线）OK")
+
+# ---------- 19. 面板上按住卡片拖动 = 排序 ----------
+board_store.set_locked(False)
+board_store.set_columns(1)          # 单列：上下拖，落点判定最直观
+board.set_locked(False)
+board.set_columns(1)
+board_store.save_scenes([])
+board_store.save_devices([d.did for d in devs[:3]])
+board_store.save_order([{"type": "device", "id": d.did} for d in devs[:3]])
+board.set_devices(devs, power)
+board._expand()
+app.processEvents()
+
+def _card_center_global(card):
+    return card.mapToGlobal(card.rect().center())
+
+a = board._cards[devs[0].did]
+b = board._cards[devs[1].did]
+start = _card_center_global(a)
+end = _card_center_global(b)
+
+# 单击（无位移）不能被排序逻辑吃掉：按下与松手都必须不消费，
+# 事件继续交给卡片自身（鼠标松手会打开设备详情）
+assert _send(a, QEvent.Type.MouseButtonPress, start) is False, "press not swallowed"
+assert _send(a, QEvent.Type.MouseButtonRelease, start,
+             Qt.MouseButton.NoButton) is False, "release without move not swallowed"
+
+# 按下 → 移动越过阈值 → 松手落在 b 上
+_send(a, QEvent.Type.MouseButtonPress, start)
+_send(a, QEvent.Type.MouseMove, start + QPoint(0, 12))
+# 拖动中必须有可见反馈：源卡片被拿起、跟随光标的浮动标签出现、落点被高亮
+assert a.graphicsEffect() is not None, "拖动时源卡片应压暗（拿起效果）"
+ghost = getattr(board, "_drag_ghost", None)
+assert ghost is not None and ghost.isVisible(), "拖动时应出现跟随光标的浮动标签"
+_send(a, QEvent.Type.MouseMove, end)
+app.processEvents()
+assert board._drop_target_key == ("device", devs[1].did), \
+    f"落点卡片未高亮: {getattr(board, '_drop_target_key', None)}"
+_send(a, QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.NoButton)
+app.processEvents()
+assert not ghost.isVisible(), "松手后浮动标签应消失"
+assert a.graphicsEffect() is None, "松手后源卡片应恢复不透明"
+
+order_after = [e["id"] for e in board_store.load_order()]
+assert order_after[0] == devs[1].did and order_after[1] == devs[0].did, \
+    f"拖拽未调整顺序: {order_after}"
+assert board._content_items()[0][1].did == devs[1].did, "重建后顺序未生效"
+
+# 锁定状态下不允许拖拽排序（锁定=冻结布局）
+board.set_locked(True)
+app.processEvents()
+c = board._cards[devs[0].did]
+_send(c, QEvent.Type.MouseButtonPress, _card_center_global(c))
+_send(c, QEvent.Type.MouseMove, _card_center_global(c) + QPoint(0, 14))
+_send(c, QEvent.Type.MouseButtonRelease, _card_center_global(c) + QPoint(0, 14),
+      Qt.MouseButton.NoButton)
+app.processEvents()
+assert [e["id"] for e in board_store.load_order()][:2] == [devs[1].did, devs[0].did], \
+    "锁定后不应还能拖动排序"
+board.set_locked(False)
+board_store.set_columns(3)
+board.set_columns(3)
+print("19. 面板卡片拖拽排序（锁定后禁用）OK")
 
 # ---------- 收尾：清运行数据 ----------
 win._all_devices = []

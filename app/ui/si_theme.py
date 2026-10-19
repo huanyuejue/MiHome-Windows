@@ -413,6 +413,19 @@ QFrame#voicePanel {
     border: 1px solid $LINE;
     border-radius: 12px;
 }
+
+/* ---------- 悬浮提示 ---------- */
+
+/* 之前没有 QToolTip 规则：提示框背景取系统调色板（深色模式下是浅黄底），
+   而全局面板规则把文字刷成主题色 —— 两相叠加会出现「黑底深字」几乎看不清
+   （挂件场景卡的「执行场景」就是这样）。这里显式定死背景/文字/描边。 */
+QToolTip {
+    background: $SURFACE;
+    color: $TEXT_PRIMARY;
+    border: 1px solid $LINE;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
 """)
 
 

@@ -51,6 +51,8 @@ _GRID_SPACING = 6
 _DRAG_HANDLE_HEIGHT = 22
 # 判定"拖动"而非"点击"的位移阈值（像素）：太小会误判抖动，太大拖不动
 _DRAG_THRESHOLD = 5
+# 面板上卡片拖拽排序的位移阈值（比窗口拖动大一点，避免点卡片时误排序）
+_REORDER_THRESHOLD = 8
 
 # 折叠横条里状态点的候选尺寸 (点径, 间距)：放不下就逐级缩小，再放不下改聚合条
 _DOT_STEPS = ((9, 5), (7, 4), (5, 3))
@@ -323,6 +325,17 @@ class WidgetsBoard(QWidget):
         hl.addStretch(1)
 
         self._tool_buttons: list[QPushButton] = []
+        # 锁定：状态开关，单独成组放最左；右侧三条是窗口动作。
+        # 分组靠 1px 竖线 + 间距，不额外加底，保持标题行干净。
+        self._lock_toggle = self._make_tool_button(
+            "mdi.lock", "锁定",
+            lambda: self.set_locked(True))
+        hl.addWidget(self._lock_toggle)
+        self._tool_divider = QFrame(self._handle)
+        self._tool_divider.setFixedSize(1, 14)
+        hl.addSpacing(2)
+        hl.addWidget(self._tool_divider)
+        hl.addSpacing(2)
         # 收起：向下箭头（折叠成横条）
         self._collapse_btn = self._make_tool_button(
             "mdi.chevron-down", "收起为细横条", self._collapse)
@@ -419,10 +432,12 @@ class WidgetsBoard(QWidget):
         # 锁定后的解锁入口之一：悬停时浮在面板右上角的小锁。
         # 不放进面板布局，避免影响卡片网格与折叠条宽度计算。
         self._lock_btn = QPushButton(self)
-        self._lock_btn.setFixedSize(20, 20)
-        self._lock_btn.setIconSize(QSize(14, 14))
+        # 锁定后标题栏已隐藏，这是"可见的解锁入口"：做小、贴角，
+        # 尽量不压住卡片右上角的电源钮（18px 贴 2px 边基本错开）
+        self._lock_btn.setFixedSize(18, 18)
+        self._lock_btn.setIconSize(QSize(12, 12))
         self._lock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._lock_btn.setToolTip("已锁定：点这里解锁（也可右键或用托盘菜单）")
+        self._lock_btn.setToolTip("解锁")
         self._lock_btn.clicked.connect(lambda: self.set_locked(False))
         self._lock_btn.hide()
 
@@ -603,13 +618,19 @@ class WidgetsBoard(QWidget):
         for btn in self._tool_buttons:
             btn.setStyleSheet(_board_btn_qss(p))
             btn.setIcon(qta.icon(btn._icon_name, color=p.text_primary))
+        divider = getattr(self, "_tool_divider", None)
+        if divider is not None:
+            divider.setStyleSheet(
+                f"QFrame {{ background: {p.line}; border: none; }}")
         lock_btn = getattr(self, "_lock_btn", None)
         if lock_btn is not None:
             lock_btn.setStyleSheet(
                 f"QPushButton {{ background: {p.surface}; border: 1px solid {p.line};"
-                f" border-radius: 10px; }}"
-                f"QPushButton:hover {{ background: {p.btn_hover}; }}")
-            lock_btn.setIcon(qta.icon("mdi.lock", color=SiColors.THEME))
+                f" border-radius: 9px; }}"
+                f"QPushButton:hover {{ background: {p.btn_hover};"
+                f" border-color: {SiColors.THEME}; }}")
+            # 图标表达"点击后会发生什么"：锁定态下显示开锁（点它解锁）
+            lock_btn.setIcon(qta.icon("mdi.lock-open-variant", color=SiColors.THEME))
         # 卡片与状态点
         grid = getattr(self, "_grid", None)
         if grid is not None:
@@ -712,6 +733,194 @@ class WidgetsBoard(QWidget):
         self._rebuild()
         self._apply_opacity()
 
+    # ---------- 面板上拖拽排序 ----------
+
+    def _card_drag_event(self, card, key: tuple[str, str], event) -> bool:
+        """按住卡片横/纵向拖动 → 调整顺序；松手后落盘并重建。
+
+        窗口拖动只发生在标题行、面板空白与折叠横条上，卡片区域本来就是空闲的，
+        所以这里不会和"移动窗口"打架。锁定状态下禁用（锁定=冻结布局）。
+        """
+        if self._locked:
+            return False
+        etype = event.type()
+        if etype == QEvent.Type.MouseButtonPress:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            self._reorder_state = {
+                "key": key,
+                "origin": event.globalPosition().toPoint(),
+                "moved": False,
+            }
+            return False      # 让卡片保留按下反馈
+        if etype == QEvent.Type.MouseMove:
+            state = getattr(self, "_reorder_state", None)
+            if not state or state["key"] != key:
+                return False
+            pos = event.globalPosition().toPoint()
+            if not state["moved"]:
+                if (pos - state["origin"]).manhattanLength() < _REORDER_THRESHOLD:
+                    return False
+                state["moved"] = True
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                # 让"正在被拖"看得见：源卡片变半透明 + 一个跟随光标的浮动标签
+                self._set_card_lifted(card, True)
+                self._show_drag_ghost(self._card_title(key), pos)
+            else:
+                self._move_drag_ghost(pos)
+            self._highlight_drop_target(pos, key)
+            return True       # 拖动期间吞掉移动，避免卡片自身抖动
+        if etype == QEvent.Type.MouseButtonRelease:
+            state = getattr(self, "_reorder_state", None)
+            self._reorder_state = None
+            if not state or state["key"] != key:
+                return False
+            if not state["moved"]:
+                return False  # 普通点击：交给卡片（打开详情）
+            target = self._card_key_at(event.globalPosition().toPoint(), exclude=key)
+            self._clear_drop_highlight()
+            self._set_card_lifted(card, False)
+            self._hide_drag_ghost()
+            self.unsetCursor()
+            if target is not None:
+                self._move_item(key, target)
+            return True       # 吞掉松手，避免又触发"打开详情"
+        return False
+
+    def _card_title(self, key: tuple[str, str]) -> str:
+        kind, ident = key
+        if kind == "device":
+            card = getattr(self, "_cards", {}).get(ident)
+            return card._name.text() if card is not None else "设备"
+        for scene in self._scenes:
+            if scene["scene_id"] == ident:
+                return str(scene.get("name") or "场景")
+        return "场景"
+
+    def _set_card_lifted(self, card, lifted: bool) -> None:
+        """拖动中的源卡片压暗，明确"它正被拿起"。"""
+        if card is None:
+            return
+        if lifted:
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+            eff = QGraphicsOpacityEffect(card)
+            eff.setOpacity(0.45)
+            card.setGraphicsEffect(eff)
+        else:
+            card.setGraphicsEffect(None)
+
+    def _ensure_drag_ghost(self):
+        ghost = getattr(self, "_drag_ghost", None)
+        if ghost is None:
+            from PySide6.QtWidgets import QLabel as _QLabel
+
+            ghost = _QLabel(
+                None,
+                Qt.WindowType.ToolTip
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowTransparentForInput,
+            )
+            ghost.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            ghost.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            ghost.hide()
+            self._drag_ghost = ghost
+        return ghost
+
+    def _show_drag_ghost(self, text: str, global_pos) -> None:
+        """跟随光标的半透明"卡片影子"——拖动时唯一能立刻看见的反馈。"""
+        ghost = self._ensure_drag_ghost()
+        p = self._palette
+        ghost.setText(text)
+        ghost.setStyleSheet(
+            f"QLabel {{ background: {p.window_bg}; color: {p.text_primary};"
+            f" border: 1px solid {SiColors.THEME}; border-radius: 8px;"
+            " padding: 5px 10px; font-size: 9pt; }")
+        ghost.adjustSize()
+        ghost.move(global_pos + QPoint(14, 14))
+        ghost.show()
+        ghost.raise_()
+
+    def _move_drag_ghost(self, global_pos) -> None:
+        ghost = getattr(self, "_drag_ghost", None)
+        if ghost is not None and ghost.isVisible():
+            ghost.move(global_pos + QPoint(14, 14))
+
+    def _hide_drag_ghost(self) -> None:
+        ghost = getattr(self, "_drag_ghost", None)
+        if ghost is not None:
+            ghost.hide()
+
+    def _card_key_at(self, global_pos, *, exclude=None):
+        """落点处的卡片 key；用于计算拖拽目标。"""
+        for key, card in self._all_cards().items():
+            if key == exclude:
+                continue
+            local = card.mapFromGlobal(global_pos)
+            if card.rect().contains(local):
+                return key
+        return None
+
+    def _all_cards(self) -> dict:
+        out = {("device", did): card for did, card in getattr(self, "_cards", {}).items()}
+        out.update({("scene", sid): card
+                    for sid, card in getattr(self, "_scene_cards", {}).items()})
+        return out
+
+    def _highlight_drop_target(self, global_pos, source_key) -> None:
+        target = self._card_key_at(global_pos, exclude=source_key)
+        if target == getattr(self, "_drop_target_key", None):
+            return
+        self._clear_drop_highlight()
+        self._drop_target_key = target
+        if target is None:
+            return
+        card = self._all_cards().get(target)
+        if card is not None:
+            # 1px 太弱（用户实测"看不出在拖"）：2px 描边 + 一层很淡的主题色底
+            tint = _rgba(QColor(SiColors.THEME), 0.14)
+            card.setStyleSheet(
+                card.styleSheet()
+                + f"QFrame#boardCard {{ border: 2px solid {SiColors.THEME};"
+                + f" background: {tint}; }}")
+
+    def _clear_drop_highlight(self) -> None:
+        target = getattr(self, "_drop_target_key", None)
+        self._drop_target_key = None
+        if target is None:
+            return
+        card = self._all_cards().get(target)
+        if card is not None and hasattr(card, "retheme"):
+            card.retheme()
+
+    def _move_item(self, source_key: tuple[str, str], target_key: tuple[str, str]) -> None:
+        """把 source 挪到 target 的位置（其余顺次平移），落盘并重建。
+
+        位置按**拖动前**的下标算：先记下 source/target 原始下标，移除 source 后
+        再插回 target 的原下标。这样"往前拖"和"往后拖"都能得到直觉上的交换效果
+        （直接用移除后的 target 下标会漏掉一处偏移，导致相邻两格拖不动）。
+        """
+        ordered = [(("device", obj.did) if kind == "device"
+                    else ("scene", obj["scene_id"]))
+                   for kind, obj in self._content_items()]
+        if source_key not in ordered or target_key not in ordered:
+            return
+        src_idx = ordered.index(source_key)
+        tgt_idx = ordered.index(target_key)
+        ordered.pop(src_idx)
+        ordered.insert(tgt_idx, source_key)
+        new_order = [{"type": t, "id": i} for t, i in ordered]
+        # 保留未渲染的条目（例如设备暂时不在列表里），附在末尾不丢
+        known = {tuple((e["type"], e["id"])) for e in new_order}
+        for entry in self._order:
+            key = (entry.get("type"), entry.get("id"))
+            if key not in known:
+                new_order.append({"type": key[0], "id": key[1]})
+                known.add(key)
+        self._order = new_order
+        board_store.save_order(new_order)
+        self._rebuild()
+
     # ---------- 锁定 ----------
 
     def is_locked(self) -> bool:
@@ -739,7 +948,7 @@ class WidgetsBoard(QWidget):
             handle.setVisible(not self._locked)
         if self._locked:
             # 悬停浮锁是"可发现"的那条解锁路，锁定后立刻给一次提示
-            self._lock_btn.setToolTip("已锁定：点这里解锁（也可右键或用托盘菜单）")
+            self._lock_btn.setToolTip("解锁")
         if not self._collapsed:
             self.resize(self._board_width(), self._board_height())
             self._remember_geometry()
@@ -760,8 +969,8 @@ class WidgetsBoard(QWidget):
             return
         size = self._lock_btn.width()
         self._lock_btn.move(
-            max(0, host.geometry().right() - size - 4),
-            max(0, host.geometry().top() + 4))
+            max(0, host.geometry().right() - size - 2),
+            max(0, host.geometry().top() + 2))
         self._lock_btn.raise_()
 
     def _refresh_lock_btn(self) -> None:
@@ -1055,9 +1264,15 @@ class WidgetsBoard(QWidget):
             if kind == "device":
                 card = _BoardCard(self, obj, self._known_power.get(obj.did))
                 self._cards[obj.did] = card
+                key = ("device", obj.did)
             else:
                 card = _SceneCard(self, obj)
                 self._scene_cards[obj["scene_id"]] = card
+                key = ("scene", obj["scene_id"])
+            # 面板上按住卡片拖动 = 排序（窗口拖动只发生在标题行/空白/折叠条，
+            # 与卡片拖动不冲突），把 key 挂在控件上供 eventFilter 识别
+            card._reorder_key = key
+            card.installEventFilter(self)
             grid.addWidget(card, idx // self._columns, idx % self._columns)
         self._grid = grid
         self._list_lay.addLayout(grid)
@@ -1246,6 +1461,9 @@ class WidgetsBoard(QWidget):
             is_handle = handle is not None and obj is handle
             is_bar = bar is not None and obj is bar
             is_root = root is not None and obj is root
+            card_key = getattr(obj, "_reorder_key", None)
+            if card_key is not None:
+                return self._card_drag_event(obj, card_key, event)
             if not (is_handle or is_bar or is_root):
                 return super().eventFilter(obj, event)
             if self._locked:
@@ -1338,6 +1556,7 @@ class WidgetsBoard(QWidget):
 
     def hideEvent(self, event) -> None:  # noqa: N802
         self._save_geometry()
+        self._hide_drag_ghost()
         super().hideEvent(event)
 
     def _show_context_menu(self, pos: QPoint) -> None:
@@ -1350,7 +1569,7 @@ class WidgetsBoard(QWidget):
         menu.addAction("刷新设备").triggered.connect(
             lambda: self.refresh_power(list(self._dids)))
         menu.addSeparator()
-        lock_text = "解锁挂件（恢复拖动）" if self._locked else "锁定挂件（固定位置、隐藏标题栏）"
+        lock_text = "解锁" if self._locked else "锁定"
         menu.addAction(lock_text).triggered.connect(lambda: self.set_locked(not self._locked))
         menu.addAction("隐藏挂件").triggered.connect(self.hide)
         menu.exec(self.mapToGlobal(pos))

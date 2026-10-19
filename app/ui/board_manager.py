@@ -198,7 +198,7 @@ class BoardManagerDialog(OverlayDialog):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(8)
 
-        self._subtitle = QLabel("勾选放在挂件上的设备与场景，可长按拖拽排序")
+        self._subtitle = QLabel("勾选设备/场景；按住 ⠿ 拖动排序")
         self._subtitle.setStyleSheet(
             f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
         box.addWidget(self._subtitle)
@@ -268,6 +268,7 @@ class BoardManagerDialog(OverlayDialog):
         self._reset_row_style(row)
         rl = QHBoxLayout(row)
         rl.setContentsMargins(10, 8, 16, 8)
+        self._add_grip(rl)
         name = QLabel(f"{dev.name}  ·  {dev.room_name}")
         name.setStyleSheet(
             f"color: {SiColors.TEXT_PRIMARY if dev.online else SiColors.OFFLINE_TEXT};"
@@ -312,6 +313,7 @@ class BoardManagerDialog(OverlayDialog):
         self._reset_row_style(row)
         rl = QHBoxLayout(row)
         rl.setContentsMargins(10, 8, 16, 8)
+        self._add_grip(rl)
         home = str(scene.get("home_name") or "")
         label = QLabel(f"{scene.get('name') or '场景'}  ·  {home or '手动场景'}")
         label.setStyleSheet(
@@ -347,6 +349,17 @@ class BoardManagerDialog(OverlayDialog):
         row.dragStarted.connect(self._on_drag_start)
         row.dragFinished.connect(self._on_drag_finish)
         self._list_lay.addWidget(row)
+
+    def _add_grip(self, layout) -> None:
+        """行首拖拽把手：明确告诉用户"这一行可以拖"。"""
+        grip = QLabel("⠿")
+        grip.setFixedWidth(10)
+        grip.setStyleSheet(
+            f"color: {SiColors.TEXT_MUTED}; background: transparent;"
+            " font-size: 9pt;")
+        grip.setToolTip("按住这一行上下拖动可调整顺序")
+        grip.setCursor(Qt.CursorShape.OpenHandCursor)
+        layout.addWidget(grip)
 
     def _apply_filter(self, text: str) -> None:
         """按关键字过滤设备行。
