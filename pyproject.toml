@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mihome-windows"
-version = "0.3.6"
+version = "0.3.7"
 description = "米家设备的 Windows 桌面控制端，基于 mijiaAPI 构建"
 readme = "README.md"
 requires-python = ">=3.10"

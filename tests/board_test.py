@@ -720,6 +720,92 @@ startup.hide()
 board_store.set_collapsed(False)
 print("16. 收起态启动 → 展开重建卡片 OK")
 
+# ---------- 17. 场景与设备混排 + 点按钮执行 ----------
+import time as _time
+
+
+def pump(seconds: float, until=None) -> None:
+    deadline = _time.time() + seconds
+    while _time.time() < deadline:
+        app.processEvents()
+        if until is not None and until():
+            return
+        _time.sleep(0.01)
+
+
+scene = {"scene_id": "s_home", "name": "回家模式", "home_id": "h1", "home_name": "家"}
+board_store.save_scenes([scene])
+board_store.save_devices([devs[0].did, devs[1].did])
+board_store.save_order([
+    {"type": "scene", "id": "s_home"},
+    {"type": "device", "id": devs[0].did},
+    {"type": "device", "id": devs[1].did},
+])
+board_store.set_columns(3)
+board.set_columns(3)
+board.set_devices(devs, power)
+app.processEvents()
+items = board._content_items()
+assert [k for k, _ in items] == ["scene", "device", "device"], \
+    f"混排顺序未按 order 生效: {[k for k, _ in items]}"
+assert "s_home" in board._scene_cards, "场景卡未创建"
+assert len(board._cards) == 2, f"设备卡数量不对: {len(board._cards)}"
+
+# 点「执行」按钮 → 走 service.run_scene（用桩记录调用）
+run_calls: list = []
+board._service.run_scene = lambda info: run_calls.append(info)
+board._scene_cards["s_home"]._run_btn.click()
+pump(3, until=lambda: bool(run_calls))
+assert run_calls and run_calls[0].scene_id == "s_home", f"场景未被调用: {run_calls}"
+assert run_calls[0].home_id == "h1", "执行场景需要带上 home_id"
+pump(3, until=lambda: board._scene_cards["s_home"]._run_btn.isEnabled())
+assert board._scene_cards["s_home"]._run_btn.isEnabled(), "执行完成后按钮应恢复可点"
+print("17. 场景与设备混排 + 执行 OK")
+
+# ---------- 18. 锁定：隐藏标题栏、禁止拖动/收起、三条解锁路径 ----------
+board_store.set_locked(False)
+board.set_locked(False)
+app.processEvents()
+h_unlocked = board.height()
+assert not board._handle.isHidden(), "未锁定时标题栏应可见"
+
+board.set_locked(True)
+app.processEvents()
+assert board.is_locked() and board_store.get_locked(), "锁定状态未生效/未落盘"
+assert board._handle.isHidden(), "锁定后标题栏应隐藏"
+assert board.height() < h_unlocked, \
+    f"锁定后应少掉标题栏高度: {board.height()} vs {h_unlocked}"
+
+# 锁定态下点击折叠条不应展开（形态固定）
+board._collapse()
+app.processEvents()
+assert board.collapsed
+_send(board._bar, QEvent.Type.MouseButtonPress, QPointF(board.x() + 30, board.y() + 16))
+_send(board._bar, QEvent.Type.MouseButtonRelease, QPointF(board.x() + 30, board.y() + 16))
+app.processEvents()
+assert board.collapsed, "锁定后点击折叠条不应展开"
+
+# 解锁（浮锁/右键/托盘三条路最终都走 set_locked(False)）
+board.set_locked(False)
+app.processEvents()
+assert not board_store.get_locked(), "解锁未落盘"
+board._expand()
+app.processEvents()
+assert not board._handle.isHidden(), "解锁后标题栏应恢复"
+
+# 管理窗里的锁定开关与主窗口预览接线
+board_store.set_locked(False)
+dlg5 = BoardManagerDialog(devs, None, scenes=[scene])
+lock_events: list = []
+dlg5.lock_preview.connect(lock_events.append)
+dlg5._lock_check.setChecked(True)
+assert board_store.get_locked() is True, "管理窗勾选锁定未落盘"
+assert lock_events and lock_events[-1] is True, f"未发出锁定预览信号: {lock_events}"
+dlg5.done(0)
+app.processEvents()
+board_store.set_locked(False)
+print("18. 锁定（隐藏标题栏 / 禁止收起 / 解锁 / 管理窗接线）OK")
+
 # ---------- 收尾：清运行数据 ----------
 win._all_devices = []
 win._force_quit = True

@@ -55,6 +55,11 @@ class TrayController:
         act_board_manage = QAction("管理桌面挂件", menu)
         act_board_manage.triggered.connect(self._on_manage_board)
         menu.addAction(act_board_manage)
+        act_board_lock = QAction("锁定桌面挂件", menu)
+        act_board_lock.setCheckable(True)
+        act_board_lock.triggered.connect(self._on_toggle_board_lock)
+        menu.addAction(act_board_lock)
+        self._board_lock_action = act_board_lock
         act_settings = QAction("设置", menu)
         act_settings.triggered.connect(self._on_settings)
         menu.addAction(act_settings)
@@ -65,6 +70,7 @@ class TrayController:
         # 每次弹出前刷新挂件菜单文案：窗口可能被挂件自己的 × 按钮关掉，
         # 菜单若一直写「显示」会与实际状态不符
         menu.aboutToShow.connect(self._refresh_board_action)
+        menu.aboutToShow.connect(self._refresh_board_lock_action)
         self._tray.setContextMenu(menu)
 
         # 快捷窗口的信号接线统一在 _create_quick_window 内做一次，
@@ -174,6 +180,21 @@ class TrayController:
 
     def _on_manage_board(self) -> None:
         self._main.show_board_manager()
+
+    def _on_toggle_board_lock(self, checked: bool) -> None:
+        """托盘菜单锁定/解锁：锁定后挂件隐藏标题栏、不能拖动。"""
+        board = getattr(self._main, "_board", None)
+        if board is None:
+            return
+        board.set_locked(bool(checked))
+
+    def _refresh_board_lock_action(self) -> None:
+        board = getattr(self._main, "_board", None)
+        if self._board_lock_action is not None and board is not None:
+            locked = bool(getattr(board, "_locked", False))
+            self._board_lock_action.setChecked(locked)
+            self._board_lock_action.setText(
+                "解锁桌面挂件" if locked else "锁定桌面挂件")
 
     def _on_settings(self) -> None:
         self._main.show_settings()

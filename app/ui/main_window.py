@@ -993,12 +993,25 @@ class MainWindow(QMainWindow):
             self._board_manager.activateWindow()
             return
         parent = None if self.isHidden() else self
-        dlg = BoardManagerDialog(self._all_devices, parent)
+        # 场景清单：优先用已缓存的全量场景；没有就现场拉一次（失败则空列表，
+        # 至少设备部分仍可管理，不会因为场景拉取失败打不开对话框）
+        scenes = self._scenes
+        if scenes is None:
+            try:
+                from app.core.models import SceneInfo  # noqa: F401
+                scenes = self._service.scene_list(None)
+            except Exception:
+                scenes = []
+        scenes_dict = [{"scene_id": s.scene_id, "name": s.name,
+                        "home_id": s.home_id, "home_name": s.home_name}
+                       for s in (scenes or [])]
+        dlg = BoardManagerDialog(self._all_devices, parent, scenes=scenes_dict)
         self._board_manager = dlg
         dlg.opacity_preview.connect(self._on_board_opacity_preview)
         dlg.columns_preview.connect(self._on_board_columns_preview)
         dlg.background_preview.connect(self._on_board_background_preview)
         dlg.topmost_preview.connect(self._on_board_topmost_preview)
+        dlg.lock_preview.connect(self._on_board_lock_preview)
         # 对话框遮挡会让挂件暂停「悬停恢复不透明」，否则看不到透明度效果
         if self._board is not None:
             self._board.set_previewing(True)
@@ -1010,8 +1023,10 @@ class MainWindow(QMainWindow):
         if result == QDialog.Accepted:
             from app.core import board_store
             board_store.save_devices(dlg.selected_dids())
+            board_store.save_scenes(dlg.selected_scenes())
+            board_store.save_order(dlg.ordered_items())
             self._update_board_devices()
-            Toast.info(self, "挂件设备已更新", 2000)
+            Toast.info(self, "挂件内容已更新", 2000)
 
     def _on_board_opacity_preview(self, value: float) -> None:
         # 落盘在对话框侧已完成，这里只负责让窗口实时可见
@@ -1030,6 +1045,10 @@ class MainWindow(QMainWindow):
     def _on_board_topmost_preview(self, topmost: bool) -> None:
         if self._board is not None:
             self._board.set_topmost(bool(topmost), persist=False)
+
+    def _on_board_lock_preview(self, locked: bool) -> None:
+        if self._board is not None:
+            self._board.set_locked(bool(locked), persist=False)
 
     def _show_more_menu(self) -> None:
         """在更多按钮左下方弹出菜单，右边缘与按钮右边缘对齐。"""

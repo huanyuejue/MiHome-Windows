@@ -244,6 +244,12 @@ class WidgetsBoard(QWidget):
         # did -> 本地操作版本号：丢弃"操作前发出、操作后回来"的旧轮询结果
         self._power_gen: dict[str, int] = {}
         self._dids: list[str] = board_store.load_devices()
+        # 场景快照与混排顺序：与设备一起渲染在同一个网格里
+        self._scenes: list[dict] = board_store.load_scenes()
+        self._order: list[dict] = board_store.load_order()
+        # 锁定：隐藏标题栏 + 禁止拖动 + 形态固定（解锁靠悬停浮锁/右键/托盘）
+        self._locked: bool = board_store.get_locked()
+        self._scene_cards: dict = {}
         self._columns: int = board_store.get_columns()
         self._opacity: float = board_store.get_opacity()
         # 背景色：None = 跟随主题；否则是用户挑的固定色
@@ -275,6 +281,8 @@ class WidgetsBoard(QWidget):
         # 配色表：跟随主题或用户挑的固定色（见 _BoardPalette）
         self._palette = _BoardPalette(self._bg)
         self._build_ui()
+        # 锁定状态在构造期就生效：标题栏直接不建出来
+        self._handle.setVisible(not self._locked)
         self._restore_geometry()
         self._apply_opacity()
         self._rebuild()
@@ -349,7 +357,7 @@ class WidgetsBoard(QWidget):
         self._scroll.setWidget(self._host)
         root_lay.addWidget(self._scroll, stretch=1)
 
-        self._empty = QLabel("还没有添加设备\n点右上角 + 选择")
+        self._empty = QLabel("还没有添加设备或场景\n点右上角 + 选择")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setStyleSheet(
             f"color: {self._palette.text_secondary}; background: transparent; font-size: 9pt;")
@@ -407,6 +415,16 @@ class WidgetsBoard(QWidget):
 
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+
+        # 锁定后的解锁入口之一：悬停时浮在面板右上角的小锁。
+        # 不放进面板布局，避免影响卡片网格与折叠条宽度计算。
+        self._lock_btn = QPushButton(self)
+        self._lock_btn.setFixedSize(20, 20)
+        self._lock_btn.setIconSize(QSize(14, 14))
+        self._lock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._lock_btn.setToolTip("已锁定：点这里解锁（也可右键或用托盘菜单）")
+        self._lock_btn.clicked.connect(lambda: self.set_locked(False))
+        self._lock_btn.hide()
 
         # 上面各控件的初始样式用主题色兜底，这里统一按当前配色表覆盖一遍：
         # 用户若设过自定义背景色，构造完就是正确颜色，不会闪一下主题色
@@ -470,9 +488,11 @@ class WidgetsBoard(QWidget):
         滚动区视口与内容恰好等高的 1px 舍入误差也会让滚动条冒出来。
         设备多到超出屏幕可用高度时封顶，由滚动条接管。
         """
-        rows = max(1, -(-len(self._dids) // max(1, self._columns)))
+        rows = max(1, -(-len(self._content_items()) // max(1, self._columns)))
         body = rows * _CARD_HEIGHT + (rows - 1) * _GRID_SPACING
-        height = 46 + body + 4
+        # 上边距 8 + 标题栏（锁定后隐藏，22px + 间距 6）+ 下边距 10 + 4px 余量
+        head = 8 + (0 if self._locked else _DRAG_HANDLE_HEIGHT + 6) + 10
+        height = head + body + 4
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             cap = screen.availableGeometry().height() - 80
@@ -583,6 +603,13 @@ class WidgetsBoard(QWidget):
         for btn in self._tool_buttons:
             btn.setStyleSheet(_board_btn_qss(p))
             btn.setIcon(qta.icon(btn._icon_name, color=p.text_primary))
+        lock_btn = getattr(self, "_lock_btn", None)
+        if lock_btn is not None:
+            lock_btn.setStyleSheet(
+                f"QPushButton {{ background: {p.surface}; border: 1px solid {p.line};"
+                f" border-radius: 10px; }}"
+                f"QPushButton:hover {{ background: {p.btn_hover}; }}")
+            lock_btn.setIcon(qta.icon("mdi.lock", color=SiColors.THEME))
         # 卡片与状态点
         grid = getattr(self, "_grid", None)
         if grid is not None:
@@ -619,11 +646,15 @@ class WidgetsBoard(QWidget):
         # 鼠标进入即恢复不透明：半透明时文字难读、看不清开关状态
         self._force_opaque = True
         self._apply_opacity()
+        self._refresh_lock_btn()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._force_opaque = False
         self._apply_opacity()
+        btn = getattr(self, "_lock_btn", None)
+        if btn is not None:
+            btn.hide()
         super().leaveEvent(event)
 
     # ---------- 折叠 / 展开 ----------
@@ -680,6 +711,70 @@ class WidgetsBoard(QWidget):
         # ——用户看到的就是「收着有状态点、展开却说还没有添加设备」。
         self._rebuild()
         self._apply_opacity()
+
+    # ---------- 锁定 ----------
+
+    def is_locked(self) -> bool:
+        return self._locked
+
+    def set_locked(self, locked: bool, *, persist: bool = True) -> None:
+        """切换锁定：隐藏标题栏、禁止拖动、形态固定（不能收起/展开）。
+
+        解锁必须留有独立通道（悬停浮锁 / 右键菜单 / 托盘菜单），
+        否则一旦锁定、标题栏也被隐藏，用户就再也点不到任何入口。
+        """
+        locked = bool(locked)
+        if locked == self._locked:
+            if persist:
+                board_store.set_locked(locked)
+            return
+        self._locked = locked
+        if persist:
+            board_store.set_locked(locked)
+        self._apply_locked()
+
+    def _apply_locked(self) -> None:
+        handle = getattr(self, "_handle", None)
+        if handle is not None:
+            handle.setVisible(not self._locked)
+        if self._locked:
+            # 悬停浮锁是"可发现"的那条解锁路，锁定后立刻给一次提示
+            self._lock_btn.setToolTip("已锁定：点这里解锁（也可右键或用托盘菜单）")
+        if not self._collapsed:
+            self.resize(self._board_width(), self._board_height())
+            self._remember_geometry()
+        # 锁定后不允许停在"拖动中"的中间态
+        self._press_origin = None
+        self.unsetCursor()
+        # 若光标此刻已在面板上（例如从管理窗勾选锁定），浮锁要立刻可见，
+        # 不能等用户移出再移入才触发 enterEvent
+        self._refresh_lock_btn()
+        self._position_lock_btn()
+
+    def _position_lock_btn(self) -> None:
+        """把浮锁按钮贴在当前可见面板的右上角。"""
+        if not hasattr(self, "_lock_btn"):
+            return
+        host = self._bar if self._collapsed else self._root
+        if host is None or not host.isVisible():
+            return
+        size = self._lock_btn.width()
+        self._lock_btn.move(
+            max(0, host.geometry().right() - size - 4),
+            max(0, host.geometry().top() + 4))
+        self._lock_btn.raise_()
+
+    def _refresh_lock_btn(self) -> None:
+        """只在锁定且鼠标悬停时显示浮锁（平时不干扰观感）。"""
+        btn = getattr(self, "_lock_btn", None)
+        if btn is None:
+            return
+        if not self._locked:
+            btn.hide()
+            return
+        btn.setVisible(self.underMouse())
+        if btn.isVisible():
+            self._position_lock_btn()
 
     # ---------- 折叠横条的状态表达 ----------
 
@@ -899,16 +994,50 @@ class WidgetsBoard(QWidget):
 
     # ---------- 卡片网格 ----------
 
+    def _content_items(self) -> list[tuple[str, object]]:
+        """按混排顺序返回挂件内容：("device", DeviceInfo) / ("scene", dict)。
+
+        order 是唯一顺序来源；order 里没登记、但确实选中的条目补到末尾
+        （旧数据升级、order 写坏时不至于丢内容）。设备信息来自推送的
+        设备列表，场景信息来自 board.json 的快照，所以断网也能显示。
+        """
+        dev_map = {d.did: d for d in self._devices}
+        scene_map = {s["scene_id"]: s for s in self._scenes}
+        items: list[tuple[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        for entry in self._order:
+            t, i = entry.get("type"), entry.get("id")
+            key = (t, i)
+            if key in seen:
+                continue
+            if t == "device" and i in dev_map:
+                items.append(("device", dev_map[i]))
+                seen.add(key)
+            elif t == "scene" and i in scene_map:
+                items.append(("scene", scene_map[i]))
+                seen.add(key)
+        for did in self._dids:
+            if ("device", did) not in seen and did in dev_map:
+                items.append(("device", dev_map[did]))
+                seen.add(("device", did))
+        for scene in self._scenes:
+            sid = scene["scene_id"]
+            if ("scene", sid) not in seen:
+                items.append(("scene", scene))
+                seen.add(("scene", sid))
+        return items
+
     def _rebuild(self) -> None:
         self._destroy_grid()
         # 每次重建都读最新清单：管理对话框保存或改列数后，内存里的
         # _dids 可能是旧的，只有读盘才不会用过期清单排版
         self._dids = board_store.load_devices()
-        lookup = {d.did: d for d in self._devices}
-        cards = [lookup[d] for d in self._dids if d in lookup]
+        self._scenes = board_store.load_scenes()
+        self._order = board_store.load_order()
+        items = self._content_items()
         # 标题带产品名：桌面上可能同时开着一堆挂件，得能认出这是谁家的
-        self._title.setText(f"{_BOARD_TITLE} · {len(cards)}")
-        if not cards:
+        self._title.setText(f"{_BOARD_TITLE} · {len(items)}")
+        if not items:
             self._empty.show()
             self._scroll.hide()
             return
@@ -921,9 +1050,14 @@ class WidgetsBoard(QWidget):
         for c in range(self._columns):
             grid.setColumnStretch(c, 1)
         self._cards = {}
-        for idx, dev in enumerate(cards):
-            card = _BoardCard(self, dev, self._known_power.get(dev.did))
-            self._cards[dev.did] = card
+        self._scene_cards = {}
+        for idx, (kind, obj) in enumerate(items):
+            if kind == "device":
+                card = _BoardCard(self, obj, self._known_power.get(obj.did))
+                self._cards[obj.did] = card
+            else:
+                card = _SceneCard(self, obj)
+                self._scene_cards[obj["scene_id"]] = card
             grid.addWidget(card, idx // self._columns, idx % self._columns)
         self._grid = grid
         self._list_lay.addLayout(grid)
@@ -935,7 +1069,8 @@ class WidgetsBoard(QWidget):
                                    self._board_width(), self._board_height())
             self.resize(self._board_width(), self._board_height())
             self._save_timer.start()
-        online = [d.did for d in cards if d.online and self._known_power.get(d.did) is None]
+        online = [d.did for d in self._devices
+                  if d.online and self._known_power.get(d.did) is None]
         if online:
             self.refresh_power(online)
 
@@ -1032,6 +1167,39 @@ class WidgetsBoard(QWidget):
 
         Toast.info(self, f"操作失败：{error}", 4000)
 
+    # ---------- 场景执行 ----------
+
+    def _run_scene(self, scene: dict, btn) -> None:
+        """执行场景：点按钮即执行（与托盘快捷窗口一致），执行中按钮置灰。"""
+        from app.core.models import SceneInfo
+
+        info = SceneInfo(
+            scene_id=str(scene.get("scene_id") or ""),
+            name=str(scene.get("name") or ""),
+            home_id=str(scene.get("home_id") or ""),
+            home_name=str(scene.get("home_name") or ""),
+        )
+        btn.setEnabled(False)
+        self._jobs.submit(
+            lambda: self._service.run_scene(info),
+            on_success=lambda _r, b=btn: self._on_scene_done(scene, b, None),
+            on_error=lambda e, b=btn: self._on_scene_done(scene, b, e),
+            priority=PRIORITY_CONTROL,
+        )
+
+    def _on_scene_done(self, scene: dict, btn, error: Exception | None) -> None:
+        import shiboken6
+
+        from app.ui.toast import Toast
+
+        if shiboken6.isValid(btn):
+            btn.setEnabled(True)
+        name = str(scene.get("name") or "场景")
+        if error is None:
+            Toast.info(self, f"已执行：{name}", 2500)
+        else:
+            Toast.info(self, f"场景执行失败：{error}", 4000)
+
     def _bump_power_gen(self, did: str) -> None:
         """本地操作过这台设备：让在途的旧轮询结果作废。"""
         self._power_gen[did] = self._power_gen.get(did, 0) + 1
@@ -1080,6 +1248,10 @@ class WidgetsBoard(QWidget):
             is_root = root is not None and obj is root
             if not (is_handle or is_bar or is_root):
                 return super().eventFilter(obj, event)
+            if self._locked:
+                # 锁定：不拖、不收起、不展开（形态由锁定时固定），
+                # 但设备/场景控件是子控件，点击不受影响
+                return False
 
             if etype == QEvent.Type.MouseButtonPress:
                 if event.button() != Qt.MouseButton.LeftButton:
@@ -1162,6 +1334,7 @@ class WidgetsBoard(QWidget):
         super().resizeEvent(event)
         if not self._collapsed:
             self._remember_geometry()
+        self._position_lock_btn()
 
     def hideEvent(self, event) -> None:  # noqa: N802
         self._save_geometry()
@@ -1176,6 +1349,9 @@ class WidgetsBoard(QWidget):
         menu.addSeparator()
         menu.addAction("刷新设备").triggered.connect(
             lambda: self.refresh_power(list(self._dids)))
+        menu.addSeparator()
+        lock_text = "解锁挂件（恢复拖动）" if self._locked else "锁定挂件（固定位置、隐藏标题栏）"
+        menu.addAction(lock_text).triggered.connect(lambda: self.set_locked(not self._locked))
         menu.addAction("隐藏挂件").triggered.connect(self.hide)
         menu.exec(self.mapToGlobal(pos))
 
@@ -1290,6 +1466,71 @@ class _BoardCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self._board.open_device_requested.emit(self._did)
         super().mouseReleaseEvent(event)
+
+
+class _SceneCard(QFrame):
+    """挂件里的场景卡：名称 + 家庭副标题 + 「执行」圆钮。
+
+    与设备卡同构（同尺寸、同配色），区别只在右侧是播放钮而不是电源钮：
+    场景没有开/关状态，点击只意味着"执行一次"。
+    """
+
+    def __init__(self, board: "WidgetsBoard", scene: dict, parent=None):
+        super().__init__(parent)
+        self._sid = str(scene.get("scene_id") or "")
+        self._scene = scene
+        self._board = board
+        self.setObjectName("boardCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedHeight(_CARD_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 8, 6)
+        lay.setSpacing(8)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(1)
+        self._name = QLabel(str(scene.get("name") or "场景"))
+        self._name.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.DemiBold))
+        self._name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._sub = QLabel(str(scene.get("home_name") or "手动场景"))
+        self._sub.setFont(QFont("Microsoft YaHei UI", 8))
+        self._sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        text_col.addWidget(self._name)
+        text_col.addWidget(self._sub)
+        lay.addLayout(text_col, stretch=1)
+
+        self._run_btn = QPushButton()
+        self._run_btn.setObjectName("sceneRunBtn")
+        self._run_btn.setFixedSize(28, 28)
+        self._run_btn.setIconSize(QSize(18, 18))
+        self._run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._run_btn.setToolTip("执行场景")
+        self._run_btn.clicked.connect(
+            lambda _c=False, b=self._run_btn: self._board._run_scene(self._scene, b))
+        lay.addWidget(self._run_btn)
+        self.retheme()
+
+    def retheme(self) -> None:
+        p = self._board.palette
+        self.setStyleSheet(
+            f"QFrame#boardCard {{ background: {p.card};"
+            f" border: 1px solid {p.line}; border-radius: 10px; }}"
+            f"QFrame#boardCard:hover {{ background: {p.card_hover};"
+            f" border-color: {p.card_border_hover}; }}")
+        self._name.setStyleSheet(
+            f"color: {p.text_primary}; background: transparent;")
+        self._sub.setStyleSheet(
+            f"color: {p.text_secondary}; background: transparent; font-size: 8pt;")
+        btn = getattr(self, "_run_btn", None)
+        if btn is not None:
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {SiColors.THEME}; border: none;"
+                " border-radius: 14px; }"
+                f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}"
+                f"QPushButton:disabled {{ background: {SiColors.THEME_DIM}; }}")
+            btn.setIcon(qta.icon("mdi.play", color="#0b0b0e"))
 
 
 def _clamp_opacity(value: float) -> float:

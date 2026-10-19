@@ -11,7 +11,7 @@
 ; 并提供开始菜单快捷方式与卸载程序。
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.6"
+  #define MyAppVersion "0.3.7"
 #endif
 
 #define MyAppName "MiHome-Windows"
@@ -53,7 +53,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 ; dist 下的全部内容（exe + dll + 依赖目录）整体装入
-Source: "dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\*"; DestDir: "{app}"; Excludes: "run.build\*,run.dist\*,installer\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"
