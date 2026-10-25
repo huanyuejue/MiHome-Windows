@@ -308,3 +308,67 @@ def set_autostart(value: bool) -> None:
             winreg.DeleteValue(key, _RUN_VALUE_NAME)
     except FileNotFoundError:
         pass
+
+
+# ---------- 语音控制 ----------
+
+def get_voice_enabled() -> bool:
+    """语音控制总开关；默认关（避免未下载模型时白等）。"""
+    return bool(_read_raw().get("voice_enabled", False))
+
+
+def set_voice_enabled(value: bool) -> None:
+    raw = _read_raw()
+    raw["voice_enabled"] = bool(value)
+    _write_raw(raw)
+
+
+def get_voice_hotkey() -> str:
+    """按住说话的全局热键，如 `F9` / `Ctrl+Alt+Space`。"""
+    value = _read_raw().get("voice_hotkey", "F9")
+    return value if isinstance(value, str) and value.strip() else "F9"
+
+
+def set_voice_hotkey(value: str) -> None:
+    raw = _read_raw()
+    raw["voice_hotkey"] = (value or "F9").strip()
+    _write_raw(raw)
+
+
+def get_voice_model() -> str:
+    """当前选择的识别模型 key（sensevoice / paraformer）。"""
+    from app.core.voice import models as voice_models
+
+    value = _read_raw().get("voice_model", voice_models.DEFAULT_MODEL)
+    return value if value in voice_models.MODELS else voice_models.DEFAULT_MODEL
+
+
+def set_voice_model(value: str) -> None:
+    from app.core.voice import models as voice_models
+
+    raw = _read_raw()
+    raw["voice_model"] = value if value in voice_models.MODELS else voice_models.DEFAULT_MODEL
+    _write_raw(raw)
+
+
+def get_voice_confirm_batch() -> bool:
+    """批量/全屋类语音指令是否弹窗二次确认；默认 True。"""
+    return bool(_read_raw().get("voice_confirm_batch", True))
+
+
+def set_voice_confirm_batch(value: bool) -> None:
+    raw = _read_raw()
+    raw["voice_confirm_batch"] = bool(value)
+    _write_raw(raw)
+
+
+def get_voice_input_device() -> str:
+    """麦克风设备名；空串表示系统默认。"""
+    value = _read_raw().get("voice_input_device", "")
+    return value if isinstance(value, str) else ""
+
+
+def set_voice_input_device(value: str) -> None:
+    raw = _read_raw()
+    raw["voice_input_device"] = value if isinstance(value, str) else ""
+    _write_raw(raw)

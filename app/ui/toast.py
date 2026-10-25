@@ -8,7 +8,7 @@
 """
 
 import shiboken6
-from PySide6.QtCore import QPropertyAnimation, QTimer
+from PySide6.QtCore import QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QWidget
 
@@ -26,7 +26,28 @@ class Toast(QFrame):
         cls._current = toast
         toast._popup(duration_ms)
 
-    def __init__(self, parent: QWidget, text: str):
+    @classmethod
+    def screen_info(cls, text: str, duration_ms: int = 4000) -> None:
+        """屏幕级通知：挂在主屏右下角，不依赖应用窗口可见。
+
+        语音控制的反馈（识别结果/错误提示）用这个——主窗口可能隐藏在
+        托盘或最小化，挂在窗口上的 Toast 用户根本看不见（提示"出现在
+        输入指令框位置"就是这个原因：宿主窗口不可见时 Toast 被裁掉了）。
+        """
+        if cls._current is not None and shiboken6.isValid(cls._current):
+            cls._current.deleteLater()
+        toast = cls(None, text)
+        toast.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.ToolTip
+            | Qt.WindowType.WindowTransparentForInput)
+        toast.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        toast.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        cls._current = toast
+        toast._popup_screen(duration_ms)
+
+    def __init__(self, parent: QWidget | None, text: str):
         super().__init__(parent)
         self.setObjectName("toastCard")
         lay = QHBoxLayout(self)
@@ -47,6 +68,18 @@ class Toast(QFrame):
         if fab is not None and shiboken6.isValid(fab) and fab.isVisible():
             y -= fab.height() + 12 + 10
         self.move(x, y)
+        self.show()
+        self.raise_()
+        QTimer.singleShot(duration_ms, self._fade_out)
+
+    def _popup_screen(self, duration_ms: int) -> None:
+        self.adjustSize()
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            self.move(geo.right() - self.width() - 24,
+                      geo.bottom() - self.height() - 24)
         self.show()
         self.raise_()
         QTimer.singleShot(duration_ms, self._fade_out)

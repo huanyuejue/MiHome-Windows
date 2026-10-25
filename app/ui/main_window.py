@@ -291,6 +291,8 @@ class MainWindow(QMainWindow):
         # 当前打开的状态明细面板（同一时刻只会有一个）
         self._status_panel = None
         self._board_manager: BoardManagerDialog | None = None
+        # 语音控制（按住热键说话）；模型未下载/未启用时为 None
+        self._voice = None
         try:
             self._board = WidgetsBoard(self._service, self._jobs, None)
             self._board.manage_requested.connect(self.show_board_manager)
@@ -653,6 +655,10 @@ class MainWindow(QMainWindow):
         self._status_hint.hide()
 
     def start(self) -> None:
+        # 语音控制：延迟到事件循环起来后再注册热键（模型/设备列表稍后就绪）
+        from PySide6.QtCore import QTimer as _QTimer
+
+        _QTimer.singleShot(1500, self, self._apply_voice_enabled)
         """应用入口第一步：校验登录态，决定拉列表还是弹扫码窗。"""
         self._show_status("正在检查登录状态…")
         self._jobs.submit(
@@ -1280,6 +1286,197 @@ class MainWindow(QMainWindow):
         dlg.exec()
         dlg.deleteLater()
 
+    # ---------- 语音控制 ----------
+
+    def _apply_voice_enabled(self) -> None:
+        """按设置启停语音控制；热键注册失败或模型缺失时给出可读提示。"""
+        from app.core import settings_store as settings
+        from app.core.voice import models as voice_models
+
+        enabled = settings.get_voice_enabled()
+        if not enabled:
+            self._teardown_voice()
+            return
+        model_key = settings.get_voice_model()
+        if not voice_models.is_ready(model_key):
+            # **模型没下载也要保持热键可用**：曾经这里直接 teardown，用户按
+            # 快捷键毫无反应，根本不知道是缺模型。现在热键照常注册，按下时
+            # 由 VoiceController 提示「请先下载语音识别模型」
+            logger.info("语音模型 %s 未就绪：热键保留，按下时提示下载", model_key)
+        # 热键/模型可能在设置里改过：与正在运行的不一致就重建，
+        # 否则用户改了热键却还是旧键生效（曾经如此）
+        spec = settings.get_voice_hotkey()
+        if self._voice is not None:
+            running = getattr(self, "_voice_running", None)
+            running_spec, running_model = running if running else (None, None)
+            if running_spec == spec:
+                # 热键没变，只有换模型：**不能重建控制器**。
+                # RegisterHotKey 是独占的（同一线程同 id 也不行），旧控制器
+                # 还占着这个键时新控制器注册必然失败，会被误报成
+                # "热键被其他软件占用"（现场就是这么遇到的）。
+                # 而模型本来就不绑定控制器——识别时才读设置，清缓存即可
+                if running_model != model_key:
+                    try:
+                        from app.core.voice import asr
+                        asr.clear_cache()
+                    except Exception:
+                        logger.exception("切换语音模型时清理识别器缓存失败")
+                    self._voice_running = (spec, model_key)
+                    logger.info("语音模型已切换为 %s（复用现有热键 %s）",
+                                model_key, spec)
+                return
+            # 热键变了才重建，且**先注册新的再关旧的**：反过来做的话，
+            # 新热键注册失败（被其他软件占用）会把旧热键也一起关掉
+            try:
+                from app.ui.voice_control import VoiceController
+
+                controller = VoiceController(
+                    self._jobs,
+                    lambda: self._all_devices,
+                    lambda: self._scenes or [],
+                    lambda: self._known_power,
+                    self,
+                )
+                if not controller.start():
+                    controller.deleteLater()
+                    return
+                controller.intent_ready.connect(self._on_voice_intent)
+                controller.status.connect(self._on_voice_status)
+                self._teardown_voice()
+                self._voice = controller
+                self._voice_running = (spec, model_key)
+                logger.info("语音控制已切换（热键 %s，模型 %s）", spec, model_key)
+            except Exception as exc:
+                logger.exception("语音控制切换失败")
+                Toast.info(self, f"语音控制切换失败：{exc}", 5000)
+            return
+        try:
+            from app.ui.voice_control import VoiceController
+
+            controller = VoiceController(
+                self._jobs,
+                lambda: self._all_devices,
+                lambda: self._scenes or [],
+                lambda: self._known_power,
+                self,
+            )
+            controller.intent_ready.connect(self._on_voice_intent)
+            controller.status.connect(self._on_voice_status)
+            if controller.start():
+                self._voice = controller
+                self._voice_running = (spec, model_key)
+                logger.info("语音控制已启动（热键 %s，模型 %s）", spec, model_key)
+        except Exception as exc:
+            logger.exception("语音控制启动失败")
+            Toast.info(self, f"语音控制启动失败：{exc}", 5000)
+
+    def _teardown_voice(self) -> None:
+        old = self._voice
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:
+                logger.exception("关闭语音控制失败")
+            # stop() 只停轮询/保活/录音，对象本身（含 parent=None 的浮条
+            # 顶层窗口）还挂着；换热键会反复走这里，必须销毁，
+            # 否则每换一次泄漏一个控制器 + 一个隐藏窗口
+            old.deleteLater()
+        self._voice = None
+        self._voice_running = None
+
+    def _voice_notice(self, text: str, is_error: bool = False) -> None:
+        """语音执行结果 → 显示在「正在听」同一个药丸位置。
+
+        语音是"说完立刻看一眼"的交互，提示换个地方就看不见；
+        控制器不可用时退回屏幕级 Toast，至少不会提示在窗口里被裁掉。
+        """
+        if self._voice is not None:
+            try:
+                self._voice.notice(text, is_error)
+                return
+            except Exception:
+                logger.exception("语音提示展示失败")
+        Toast.screen_info(text, 4500 if is_error else 2500)
+
+    def _on_voice_status(self, message: str, is_error: bool) -> None:
+        # 药丸已由 VoiceController._notify 就地展示，这里只留日志避免重复提示
+        logger.info("语音提示（%s）：%s", "错误" if is_error else "信息", message)
+
+    def _on_voice_intent(self, intent) -> None:
+        """语音意图 → 复用现有控制链路执行（不重新实现一套设备控制）。"""
+        from app.core import settings_store as settings
+        from app.core.voice.parser import Intent
+
+        if not isinstance(intent, Intent):
+            return
+        if intent.kind == "error":
+            self._voice_notice(intent.message or "没有听懂", True)
+            return
+        if intent.kind == "scene":
+            scene = intent.scene or {}
+            info = SceneInfo(
+                scene_id=str(getattr(scene, "scene_id", None)
+                             or (scene.get("scene_id") if isinstance(scene, dict) else "") or ""),
+                name=str(getattr(scene, "name", None)
+                         or (scene.get("name") if isinstance(scene, dict) else "") or ""),
+                home_id=str(getattr(scene, "home_id", None)
+                            or (scene.get("home_id") if isinstance(scene, dict) else "") or ""),
+                home_name=str(getattr(scene, "home_name", None)
+                              or (scene.get("home_name") if isinstance(scene, dict) else "") or ""),
+            )
+            self._jobs.submit(
+                lambda: self._service.run_scene(info),
+                on_success=lambda _r: self._voice_notice(intent.message or "场景已执行"),
+                on_error=lambda e: self._voice_notice(f"场景执行失败：{e}", True),
+                priority=0,
+            )
+            return
+
+        devices = list(intent.devices)
+        state = bool(intent.state)
+        if not devices:
+            return
+        if intent.batch and settings.get_voice_confirm_batch():
+            verb = "打开" if state else "关闭"
+            names = "、".join(getattr(d, "name", "") for d in devices[:5])
+            more = f" 等 {len(devices)} 台" if len(devices) > 5 else ""
+            ans = QMessageBox.question(
+                self, "确认语音指令",
+                f"要{verb}这 {len(devices)} 台设备吗？\n{names}{more}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                # 默认落在「否」：语音误识别的代价不对称，全屋关灯点错更亏
+                QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                self._voice_notice("已取消")
+                return
+
+        def _run() -> list[str]:
+            failed: list[str] = []
+            for dev in devices:
+                try:
+                    self._service.set_power_state(dev.did, state)
+                except Exception as exc:
+                    logger.warning("语音开关失败 %s: %s", dev.did, exc)
+                    failed.append(dev.did)
+            return failed
+
+        def _done(failed: list[str]) -> None:
+            ok_dids = [d.did for d in devices if d.did not in failed]
+            for did in ok_dids:
+                self._known_power[did] = state
+            if self._board is not None and ok_dids:
+                self._board.apply_power_states({did: state for did in ok_dids})
+            if failed:
+                self._voice_notice(f"已执行 {len(ok_dids)} 台，{len(failed)} 台失败", True)
+            else:
+                self._voice_notice(intent.message or "已执行")
+            self._refresh_power_states(force=True)
+
+        self._jobs.submit(_run, on_success=_done,
+                          on_error=lambda e: self._voice_notice(f"语音执行失败：{e}", True),
+                          priority=0)
+
     def show_settings(self) -> None:
         """打开设置对话框（托盘菜单与主界面菜单共用入口）。"""
         # 弹出期间置顶已有实例，避免托盘与主界面重复弹出
@@ -1294,6 +1491,8 @@ class MainWindow(QMainWindow):
         scale_changed = getattr(dlg, "_scale_changed", False)
         dlg.deleteLater()
         self._settings_dialog = None
+        # 设置里可能改了语音开关/热键/模型：关闭后按最新设置重启语音控制
+        self._apply_voice_enabled()
         # 界面缩放改动需重启应用生效：提供一键重启（常驻托盘时关窗口
         # 只是隐藏到托盘、进程仍在，仅提示会让用户以为没生效）
         if scale_changed:

@@ -57,6 +57,10 @@ workbench.json
 settings.json
 board.json
 schedules.json
+
+# 语音识别模型（按需下载，约 228MB，绝不提交；源码模式落在项目根 models/）
+models/
+
 # 原子写的临时残留（正常流程会被 os.replace 消费）
 *.json.tmp
 
