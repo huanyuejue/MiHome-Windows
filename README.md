@@ -3,7 +3,7 @@
 米家设备的 Windows 桌面控制端。基于 [mijiaAPI](https://github.com/Do1e/mijia-api)
 构建图形界面，扫码登录后即可在本地窗口中查看和控制家里的全部米家设备。
 
-> 本项目基于https://github.com/huanyuejue/MiHome-Windows制作，感谢原作者的开源！
+> 本项目基于[huanyuejue](https://github.com/huanyuejue/MiHome-Windows)开源项目制作，在此感谢原作者！
 
 ## 功能
 
