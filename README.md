@@ -3,7 +3,7 @@
 米家设备的 Windows 桌面控制端。基于 [mijiaAPI](https://github.com/Do1e/mijia-api)
 构建图形界面，扫码登录后即可在本地窗口中查看和控制家里的全部米家设备。
 
-> **注意：当前项目仍处于早期版本。** 作者个人米家设备有限，无法对各类设备做针对性适配测试，因此 UI 和操作逻辑的完善度不算很高。不过基础使用（扫码登录、设备列表与常用控制、托盘、小爱语音等）已无大碍，但需适配更多设备功能则需要社区支持了。
+> 本项目基于[huanyuejue](https://github.com/huanyuejue/MiHome-Windows)开源项目制作，在此感谢原作者！
 
 ## 功能
 
@@ -21,6 +21,7 @@
 - **界面缩放**：50%–200% 无级调节（叠加在系统缩放之上），需重启生效
 - **开机自启动**：可选，写入当前用户注册表（HKCU Run）
 - **小爱语音**：主界面右下角悬浮按钮，输入文字指令发送给在线小爱音箱，可指定默认输出音箱
+- **本地语音控制**：按全局热键说话，录音在本机识别，直接开关设备 / 执行场景，无需小爱音箱；具体见[0.4.1Tag](https://github.com/wlttechnology/MiHome-Windows/releases/tag/V0.4.1)
 - **版本检测**：启动时自动检查 GitHub Releases 新版本，也可在关于页手动检测
 - **本地缓存**：设置、托盘/工作台配置与设备缓存存放在用户数据目录（详见下方路径说明）
 - **上游可升级**：mijiaAPI 仅作为 PyPI 依赖锁定在 `>=5,<6`，升级后跑 `python -m tests.smoke_test` 即可确认兼容性
@@ -230,6 +231,7 @@ LICENSE                         # GPL-3.0 许可证
 | qrcode | >=8 | 登录二维码生成 |
 | qtawesome | >=1.4 | Material Design 图标 |
 | numpy | - | SiliconUI 动画插值 |
+| sherpa-onnx | >=2,<3 | 本地语音识别引擎（离线；识别模型按需下载，不进安装包） |
 | typing_extensions | - | SiliconUI 在 Python 3.10 下所需的类型别名 |
 
 ## 排查问题
@@ -253,6 +255,8 @@ LICENSE                         # GPL-3.0 许可证
 
 - [mijia-api](https://github.com/Do1e/mijia-api) - 米家 API 封装
 - [PySide6-SiliconUI](https://github.com/H1DDENADM1N/PySide6-SiliconUI) - UI 组件库（已内置至 `app/siui/`）
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) - 本地语音识别运行时（Apache-2.0）
+- SenseVoice / Paraformer 识别模型 - 由 sherpa-onnx 官方发布，**按需下载、不随安装包分发**，遵循各自模型协议
 
 对本项目代码的使用、修改与分发同样须遵循 GPL-3.0。
 

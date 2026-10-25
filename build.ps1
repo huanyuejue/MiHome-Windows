@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+﻿# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 MiHome-Windows contributors
 <#
 .SYNOPSIS
@@ -290,6 +290,13 @@ $NuitkaArgs = @(
     "--include-data-files=app\ui\tray_icon.png=app/ui/tray_icon.png"
     "--include-data-files=app\ui\tray_icon_light.png=app/ui/tray_icon_light.png"
     "--include-data-dir=$PySide6Translations=PySide6/translations"
+    # 语音控制：sherpa-onnx 原生 pyd 与 QtMultimedia 插件都不会被自动带全，
+    # 显式包含；模型本身不打包（按需下载到用户目录）
+    "--include-package=sherpa_onnx"
+    "--include-package-data=sherpa_onnx"
+    "--include-package=PySide6.QtMultimedia"
+    # 音频采集后端是 Qt 插件：只 include 包不带插件，打包版会没有音频设备
+    "--include-qt-plugins=multimedia"
     "--nofollow-import-to=tkinter,unittest,pytest"
     # tools/ 与 tests/ 不参与打包：Nuitka 只跟随 run.py 的 import 链，
     # 它们本来就不会被带进去；这里显式排除以防将来被间接引用

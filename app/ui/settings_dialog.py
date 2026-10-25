@@ -8,20 +8,23 @@
 替换带来的生硬变化。
 """
 
-from PySide6.QtCore import QEvent, QPropertyAnimation, QSize, Qt
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QEvent, QPropertyAnimation, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QKeySequence
 from PySide6.QtWidgets import (
     QColorDialog,
     QDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
+    QKeySequenceEdit,
     QLabel,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
+
+import threading
 
 import qtawesome as qta
 
@@ -34,6 +37,7 @@ from app.ui.si_theme import (
     SiColors,
     apply_combo_qss,
     primary_button_qss,
+    secondary_button_qss,
     themed_combo,
     themed_switch,
     themed_tab_button,
@@ -414,10 +418,92 @@ class SettingsDialog(OverlayDialog):
         _sync_switch(self._update_toggle)
         update_row.addWidget(self._update_toggle)
 
+        # ── 语音控制：开关 ──
+        self._voice_item, self._voice_label, self._voice_desc, voice_row = self._make_item(
+            "语音控制",
+            "按住热键说「打开客厅灯」「执行回家模式」即可控制；"
+            "识别在本机完成，录音不上传。"
+            "「所有灯」按设备名里的「灯」字识别：灯类设备请命名为「书房灯」"
+            "「洗漱台灯1」这种带「灯」的名字，否则不会被「所有灯」纳入"
+            "（多键开关的默认通道名如「卫生间」「洗漱台1」也算没有「灯」字）")
+        self._voice_toggle = themed_switch()
+        self._voice_toggle.setChecked(settings_store.get_voice_enabled())
+        _sync_switch(self._voice_toggle)
+        voice_row.addWidget(self._voice_toggle)
+
+        # ── 语音控制：唤起快捷键 ──
+        self._voice_hotkey_item, self._voice_hotkey_label, \
+            self._voice_hotkey_desc, hotkey_row = self._make_item(
+                "语音唤起快捷键",
+                "点一下输入框后按下想用的键（或组合键），例如 F9、Ctrl+Alt+Space；"
+                "按住说话、松开识别；语音识别模型下载后才可唤醒语音")
+        self._voice_hotkey_edit = QKeySequenceEdit()
+        self._voice_hotkey_edit.setFixedHeight(30)
+        if hasattr(self._voice_hotkey_edit, "setMaximumSequenceLength"):
+            self._voice_hotkey_edit.setMaximumSequenceLength(1)
+        self._voice_hotkey_edit.setKeySequence(
+            QKeySequence(settings_store.get_voice_hotkey()))
+        hotkey_row.addWidget(self._voice_hotkey_edit)
+
+        # ── 语音控制：识别模型（按需下载）──
+        self._voice_model_item, self._voice_model_label, \
+            self._voice_model_desc, model_row = self._make_item(
+                "语音识别模型",
+                "首次使用需下载模型到本机；"
+                "推荐 SenseVoice 模型（约 228MB）更准确；"
+                "轻量模型体积小但理解能力稍弱")
+        from app.core.voice import models as _voice_models
+        self._voice_model_keys = [m.key for m in _voice_models.MODELS.values()]
+        self._voice_model_combo = themed_combo(
+            [m.title for m in _voice_models.MODELS.values()],
+            current=next((m.title for m in _voice_models.MODELS.values()
+                          if m.key == settings_store.get_voice_model()),
+                         _voice_models.SENSE_VOICE.title))
+        self._voice_model_status = QLabel()
+        self._voice_model_status.setWordWrap(True)
+        self._voice_model_btn = QPushButton("下载")
+        self._voice_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._voice_model_btn.setFixedHeight(30)
+        self._voice_model_btn.clicked.connect(self._on_voice_model_action)
+        self._voice_model_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_voice_model_ui())
+        model_row.addWidget(self._voice_model_status)
+        model_row.addWidget(self._voice_model_combo)
+        model_row.addWidget(self._voice_model_btn)
+
+        # ── 语音控制：批量指令二次确认 ──
+        self._voice_batch_item, self._voice_batch_label, \
+            self._voice_batch_desc, batch_row = self._make_item(
+                "语音批量指令二次确认",
+                "「全部关灯」「客厅的灯都关了」这类会影响多台的指令，执行前弹窗确认；"
+                "关掉则直接执行")
+        self._voice_batch_toggle = themed_switch()
+        self._voice_batch_toggle.setChecked(settings_store.get_voice_confirm_batch())
+        _sync_switch(self._voice_batch_toggle)
+        batch_row.addWidget(self._voice_batch_toggle)
+
+        # 下载在后台线程跑，UI 只轮询 models.dl_state（模块级共享）：
+        # 设置页保存关闭后重开，后台下载仍在跑，进度能从模块级状态接回来，
+        # 不会出现"显示未下载完整、点下载又说正在下载中"的死锁观感
+        from app.core.voice import models as _vm_dl
+        self._voice_dl_timer = QTimer(self)
+        self._voice_dl_timer.setInterval(200)
+        self._voice_dl_timer.timeout.connect(self._poll_voice_download)
+        if _vm_dl.dl_state.get("running"):
+            self._voice_dl_state = dict(_vm_dl.dl_state)
+            self._voice_model_btn.setEnabled(False)
+            self._voice_dl_timer.start()
+            self._voice_model_status.setText("下载中…（正在接续上一次进度）")
+        else:
+            self._voice_dl_state = {}
+        self._refresh_voice_model_ui()
+
         return self._build_scroll([
             self._autostart_item, self._speaker_item, self._tray_item,
             self._start_min_item, self._board_item, self._hide_item,
             self._update_item,
+            self._voice_item, self._voice_hotkey_item,
+            self._voice_model_item, self._voice_batch_item,
         ])
 
     # ---------- 分类切换 ----------
@@ -473,7 +559,9 @@ class SettingsDialog(OverlayDialog):
         for item in (self._tray_item, self._start_min_item, self._fab_item,
                      self._scene_item, self._theme_item, self._autostart_item,
                      self._speaker_item, self._hide_item, self._scale_item,
-                     self._update_item, self._board_item, self._accent_item):
+                     self._update_item, self._board_item, self._accent_item,
+                     self._voice_item, self._voice_hotkey_item,
+                     self._voice_model_item, self._voice_batch_item):
             item.setStyleSheet(panel_card)
             # 高度按内容自适应（不固定）：长描述换行后行自然变高，
             # 不会被固定 64px 裁掉；短描述保持紧凑。QScrollArea 负责
@@ -484,13 +572,17 @@ class SettingsDialog(OverlayDialog):
         for label in (self._tray_label, self._start_min_label, self._fab_label,
                       self._scene_label, self._theme_label, self._autostart_label,
                       self._speaker_label, self._hide_label, self._scale_label,
-                      self._update_label, self._board_label, self._accent_label):
+                      self._update_label, self._board_label, self._accent_label,
+                      self._voice_label, self._voice_hotkey_label,
+                      self._voice_model_label, self._voice_batch_label):
             label.setStyleSheet(
                 f"color: {SiColors.TEXT_PRIMARY}; background: transparent; font-size: 10pt;")
         for desc in (self._tray_desc, self._start_min_desc, self._fab_desc,
                      self._scene_desc, self._theme_desc, self._autostart_desc,
                      self._speaker_desc, self._hide_desc, self._scale_desc,
-                     self._update_desc, self._board_desc, self._accent_desc):
+                     self._update_desc, self._board_desc, self._accent_desc,
+                     self._voice_desc, self._voice_hotkey_desc,
+                     self._voice_model_desc, self._voice_batch_desc):
             desc.setStyleSheet(
                 f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 7pt;")
         # 主按钮文字固定白色（不随深/浅主题翻转）
@@ -652,6 +744,148 @@ class SettingsDialog(OverlayDialog):
         combo.setCurrentText(self._scale_pct_text(value))
         combo.blockSignals(False)
 
+    # ---------- 语音控制 ----------
+
+    def _voice_model_key(self) -> str:
+        idx = self._voice_model_combo.currentIndex()
+        if 0 <= idx < len(self._voice_model_keys):
+            return self._voice_model_keys[idx]
+        return self._voice_model_keys[0]
+
+    def _refresh_voice_model_ui(self) -> None:
+        """按当前选中模型刷新「状态 + 按钮文案」。"""
+        from app.core.voice import models as vm
+
+        key = self._voice_model_key()
+        model = vm.MODELS.get(key)
+        if model is None:
+            return
+        btn = "下载"
+        if vm.is_ready(key):
+            btn = "删除"
+        elif vm.partial_bytes(key) > 0:
+            # 有未完成的段文件：支持断点续传，按钮直说"继续下载"
+            btn = "继续下载"
+        self._voice_model_status.setText(vm.describe(key))
+        self._voice_model_status.setStyleSheet(
+            f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 8pt;")
+        self._voice_model_btn.setText(btn)
+        self._voice_model_btn.setStyleSheet(secondary_button_qss("6px 14px"))
+        apply_combo_qss(self._voice_model_combo)
+        self._voice_model_combo.set_arrow_color(SiColors.TEXT_SECONDARY)
+
+    def _on_voice_model_action(self) -> None:
+        from app.core.voice import asr, models as vm
+
+        key = self._voice_model_key()
+        if vm.is_ready(key):
+            # 先清识别器缓存、再删目录：Windows 下 onnx 文件被加载中会被占用，
+            # rmtree 静默失败 → 目录残留、仍显示"已就绪"，用户以为没删掉
+            asr.clear_cache()
+            vm.remove_model(key)
+            self._refresh_voice_model_ui()
+            return
+        if self._voice_dl_state.get("running"):
+            return
+        # 状态以模块级 dl_state 为唯一真源（曾放对话框实例里，
+        # 重开设置页后进度与并发锁就对不上了）
+        vm.dl_state.update(running=True, key=key, done=0, total=0,
+                           file="", error="")
+        self._voice_dl_state = dict(vm.dl_state)
+        self._voice_model_btn.setEnabled(False)
+
+        def _work() -> None:
+            state = vm.dl_state
+            try:
+                vm.download_model(
+                    key,
+                    lambda done, total, name: state.update(
+                        done=done, total=total, file=name),
+                    # 取消走模块级标志：将来加"取消"按钮只需置位它，
+                    # 下载线程在分块边界立即停止并保留断点进度
+                    lambda: vm.dl_cancel,
+                )
+            except Exception as exc:      # noqa: BLE001 - 交给 UI 展示
+                state["error"] = str(exc)
+            finally:
+                state["running"] = False
+
+        threading.Thread(target=_work, daemon=True, name="voice-model-dl").start()
+        self._voice_dl_timer.start()
+
+    def _poll_voice_download(self) -> None:
+        from app.core.voice import asr, models as vm
+
+        # 直接读模块级真源：下载线程更新的是 vm.dl_state，
+        # 读 self._voice_dl_state（启动时的快照副本）进度永远是 0
+        state = vm.dl_state
+        self._voice_dl_state = dict(state)
+        if state.get("running"):
+            done = int(state.get("done") or 0) / 1048576
+            total = int(state.get("total") or 0) / 1048576
+            name = state.get("file") or ""
+            text = f"下载中 {done:.1f}"
+            if total > 0:
+                text += f" / {total:.1f} MB（{done / total * 100:.0f}%）"
+            else:
+                text += " MB"
+            if name:
+                text += f" · {name}"
+            self._voice_model_status.setText(text)
+            return
+        self._voice_dl_timer.stop()
+        self._voice_model_btn.setEnabled(True)
+        error = state.get("error") or ""
+        if error:
+            self._voice_model_status.setText(f"下载失败：{error}")
+            self._voice_model_status.setStyleSheet(
+                f"color: {SiColors.ERROR_TEXT}; background: transparent; font-size: 8pt;")
+        else:
+            asr.clear_cache()
+            self._refresh_voice_model_ui()
+        # 本次任务结束：清模块级状态，下次重开设置页从干净状态开始
+        vm.dl_state.update(running=False, key="", done=0, total=0,
+                           file="", error="")
+        self._voice_dl_state = {}
+
+    def _voice_hotkey_spec(self) -> str:
+        """QKeySequence → 我们自己的热键写法（Meta 记为 Win）。"""
+        seq = self._voice_hotkey_edit.keySequence()
+        text = seq.toString().strip()
+        if not text:
+            return settings_store.get_voice_hotkey()
+        return text.replace("Meta", "Win")
+
+    def _check_voice_hotkey_before_save(self) -> bool:
+        """保存前预检热键：写法可解析且当前未被占用；不通过弹提示并拒绝保存。
+
+        探测用 RegisterHotKey 即注册即还原；与正在运行的语音热键相同则
+        视为可用（它已注册在我们自己手里）。返回 True 表示可以继续保存。
+        """
+        from app.core.voice import hotkey as vk_hotkey
+
+        spec = self._voice_hotkey_spec()
+        try:
+            vk_hotkey.parse_spec(spec)
+        except ValueError as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "热键无效",
+                f"热键「{spec}」无法使用：{exc}\n请改一个键再保存。")
+            return False
+        if spec == settings_store.get_voice_hotkey():
+            return True          # 没改，正在用的就是它
+        # 传入本程序正在使用的热键：同键判为可用，不能因为"我们自己占着"
+        # 就报"被其他软件占用"（RegisterHotKey 独占，自注册必然失败）
+        if vk_hotkey.probe_available(spec, settings_store.get_voice_hotkey()):
+            return True
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            self, "热键被占用",
+            f"热键「{vk_hotkey.format_spec(spec)}」已被其他软件占用，"
+            f"请换一个键再保存。")
+        return False
+
     def _save_and_accept(self) -> None:
         settings_store.set_minimize_to_tray(self._tray_toggle.isChecked())
         # 子开关仅在父开关开启时有效，关闭时强制写入 False
@@ -686,6 +920,16 @@ class SettingsDialog(OverlayDialog):
             settings_store.set_autostart(self._autostart_toggle.isChecked())
         except OSError:
             pass
+        # ---- 语音控制 ----
+        # 热键先预检（写法/冲突），不通过则停在设置页让用户改
+        # 只在语音控制启用时校验热键：没开语音时这个键不生效，没理由因为它
+        # 被占用/写法怪就拦住"保存"（用户只是想改透明度、主题等其它设置）
+        if self._voice_toggle.isChecked() and not self._check_voice_hotkey_before_save():
+            return
+        settings_store.set_voice_enabled(self._voice_toggle.isChecked())
+        settings_store.set_voice_hotkey(self._voice_hotkey_spec())
+        settings_store.set_voice_model(self._voice_model_key())
+        settings_store.set_voice_confirm_batch(self._voice_batch_toggle.isChecked())
         self.accept()
 
     def done(self, result) -> None:  # noqa: N802

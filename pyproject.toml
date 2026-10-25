@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mihome-windows"
-version = "0.4.0"
+version = "0.4.1"
 description = "米家设备的 Windows 桌面控制端，基于 mijiaAPI 构建"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,8 @@ dependencies = [
     "numpy",
     # SiliconUI 内置组件在 Python 3.10 下需要 Self / TypeAlias 类型别名
     "typing_extensions",
+    # 语音控制：本地离线识别（模型按需下载，不随安装包分发）
+    "sherpa-onnx>=2,<3",
 ]
 
 [tool.setuptools.packages.find]
