@@ -223,9 +223,11 @@ class MainWindow(QMainWindow):
         # 托盘常驻内存优化：窗口隐藏期间不构建卡片网格（数十个
         # 卡片控件 + 样式约占 20-30MB），标记脏位、首次显示时构建
         self._grid_dirty = False
-        # 隐藏无可控制功能的设备（设置开关，默认关）
-        from app.core.settings_store import get_hide_no_func_devices
+        # 隐藏无可控制功能/离线设备（设置开关，默认关）
+        from app.core.settings_store import (
+            get_hide_no_func_devices, get_hide_offline_devices)
         self._hide_no_func = get_hide_no_func_devices()
+        self._hide_offline = get_hide_offline_devices()
         # 场景选项卡（设置开关，默认开）与场景视图状态：
         # _scenes 为 None 表示尚未加载，空列表为「确认无场景」
         from app.core.settings_store import get_show_scene_tab
@@ -1386,11 +1388,14 @@ class MainWindow(QMainWindow):
         # 「桌面挂件」开关可能刚被切换：立即生效（开启即显示、关闭即隐藏），
         # 同时刷新两个菜单里的挂件入口
         self._apply_board_enabled()
-        # “隐藏无可控制功能的设备”开关可能变化：重载并刷新展示
-        from app.core.settings_store import get_hide_no_func_devices
+        # 两个隐藏开关可能变化：重载并刷新展示
+        from app.core.settings_store import (
+            get_hide_no_func_devices, get_hide_offline_devices)
         new_hide = get_hide_no_func_devices()
-        if new_hide != self._hide_no_func:
+        new_hide_off = get_hide_offline_devices()
+        if new_hide != self._hide_no_func or new_hide_off != self._hide_offline:
             self._hide_no_func = new_hide
+            self._hide_offline = new_hide_off
             self._rebuild_tabs()
             self._rebuild_grid()
             self._update_count_label()
@@ -1856,6 +1861,7 @@ class MainWindow(QMainWindow):
             if (self._current_home == _ALL_HOMES or d.home_name == self._current_home)
             and (self._current_room == _ALL_ROOMS or d.room_name == self._current_room)
             and (not self._hide_no_func or self._device_has_functions(d))
+            and (not self._hide_offline or d.online)
         ]
 
     def _device_has_functions(self, device: DeviceInfo) -> bool:
@@ -1864,10 +1870,13 @@ class MainWindow(QMainWindow):
         return state is not False
 
     def _displayed_devices(self) -> list[DeviceInfo]:
-        """主页/托盘展示列表（含家庭/房间过滤与“隐藏无功能设备”）。"""
-        if not self._hide_no_func:
-            return self._all_devices
-        return [d for d in self._all_devices if self._device_has_functions(d)]
+        """主页/托盘展示列表（含家庭/房间过滤与隐藏类开关）。"""
+        out = self._all_devices
+        if self._hide_no_func:
+            out = [d for d in out if self._device_has_functions(d)]
+        if self._hide_offline:
+            out = [d for d in out if d.online]
+        return out
 
     def _show_home_menu(self) -> None:
         if not self._homes:

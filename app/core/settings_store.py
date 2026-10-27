@@ -26,6 +26,8 @@ _DEFAULTS: dict = {
     # 由 ui/si_theme.set_accent 统一计算，这里只存用户选的那个值。
     "theme_accent": "",
     "hide_no_func_devices": False,
+    # 是否隐藏离线设备（主页与托盘均不显示），默认关闭
+    "hide_offline_devices": False,
     "show_scene_tab": True,  # 主页选项卡最左侧显示「场景」入口（手动场景一键执行）
     "default_speaker_did": "",  # 小爱指令默认输出音箱；空串=自动（第一个在线）
     # 托盘音响栏正在控制哪台音箱。与 default_speaker_did 刻意分开：
@@ -218,6 +220,17 @@ def get_tray_audio_speaker_did() -> str:
 def set_tray_audio_speaker_did(value: str) -> None:
     raw = _read_raw()
     raw["tray_audio_speaker_did"] = value if isinstance(value, str) else ""
+    _write_raw(raw)
+
+
+def get_hide_offline_devices() -> bool:
+    """是否隐藏离线设备，默认关闭。"""
+    return bool(_read_raw().get("hide_offline_devices", False))
+
+
+def set_hide_offline_devices(value: bool) -> None:
+    raw = _read_raw()
+    raw["hide_offline_devices"] = bool(value)
     _write_raw(raw)
 
 
