@@ -1123,6 +1123,9 @@ class MainWindow(QMainWindow):
             new_name = replacements.get(d.did)
             if new_name and new_name != d.name:
                 d.name = new_name
+                # 本地化后的名字才是"没有自定义名时该显示的名字"，
+                # cloud_name 要同步，否则恢复默认会退回云端英文名
+                d.cloud_name = new_name
                 changed = True
         if not changed:
             return False
@@ -1133,6 +1136,8 @@ class MainWindow(QMainWindow):
         for d in self._all_devices:
             if by_name.get(d.name, 0) > 1 and d.did in replacements:
                 d.name = f"{d.name}·{d.did[-3:]}"
+                # 加尾号后的名字同样是默认展示名，cloud_name 跟着走
+                d.cloud_name = d.name
         self._rebuild_grid()
         self._update_count_label()
         self._update_tray_devices()
@@ -1811,7 +1816,11 @@ class MainWindow(QMainWindow):
         if device is None:
             return
         custom = name_override_store.get(did)
-        device.name = custom or device.cloud_name or device.name
+        # cloud_name 为空说明还没跑过 _apply_custom_names（旧缓存数据），
+        # 此时先把当前名字当作默认名，避免恢复默认时无值可退
+        if not device.cloud_name:
+            device.cloud_name = device.name
+        device.name = custom or device.cloud_name
         card = self._cards.get(did)
         # 卡片可能已随网格重建被销毁，先确认底层对象还在
         if card is not None and shiboken6.isValid(card):

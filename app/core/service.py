@@ -14,9 +14,11 @@ _complete_qr_login 两步使用，是因为上游的 login() 会把二维码打�
 取代旧版按 model 在 home.miot-spec.com 抓页解析的方式。
 """
 
+import functools
 import json
 import logging
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -100,8 +102,26 @@ def _wrap_error(exc: Exception, context: str) -> ServiceError:
     return ServiceError(f"{context}: {detail}")
 
 
+def _serialized(method):
+    """把服务方法串到实例锁上，避免多线程同时碰上游客户端。"""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class MijiaService:
     def __init__(self):
+        # 服务实例被多个后台队列共享（控制队列与网络队列各一个线程），
+        # 内部的 mijiaAPI 客户端与各类缓存都不是线程安全的：requests 的
+        # 连接池与 SSL 上下文并发使用会导致 C 层访问越界，表现为进程
+        # 直接闪退。这里用一把可重入锁把会发网络请求的方法串起来，
+        # 重入是因为部分方法内部会互相调用。
+        # 只读缓存的方法不加锁：它们被主线程高频调用，一旦排队到慢
+        # 请求后面会把界面卡住，而字典读取本身有 GIL 保护。
+        self._lock = threading.RLock()
         # 认证文件沿用上游默认位置 ~/.config/mijia-api/auth.json，
         # 这样 CLI 里扫过的码在 GUI 直接生效，反之亦然
         self._api = self._init_api()
@@ -154,12 +174,14 @@ class MijiaService:
 
     # ---------- 登录 ----------
 
+    @_serialized
     def login_status(self) -> bool:
         try:
             return self._api.available
         except Exception:
             return False
 
+    @_serialized
     def qr_login_begin(self) -> dict | None:
         """获取扫码登录数据。
 
@@ -176,6 +198,7 @@ class MijiaService:
             return None
         return data
 
+    @_serialized
     def qr_login_wait(self, login_data: dict) -> None:
         """长轮询等待用户扫码，阻塞可达两分钟，必须放在后台线程调用。"""
         try:
@@ -185,6 +208,7 @@ class MijiaService:
 
     # ---------- 设备列表 ----------
 
+    @_serialized
     def list_devices(self) -> list[DeviceInfo]:
         """拉取全部家庭和共享设备并补齐房间归属。
 
@@ -221,6 +245,7 @@ class MijiaService:
 
     # ---------- 设备控制 ----------
 
+    @_serialized
     def device_detail(self, did: str) -> DeviceDetail:
         dev = self._get_device(did)
         # prop_list 对属性名里的 '-' 额外注册了一份 '_' 别名键，
@@ -247,6 +272,7 @@ class MijiaService:
         return DeviceDetail(did=dev.did, name=dev.name, model=dev.model,
                             props=props, actions=actions)
 
+    @_serialized
     def read_prop(self, did: str, name: str):
         dev = self._get_device(did)
         try:
@@ -254,6 +280,7 @@ class MijiaService:
         except Exception as exc:
             raise _wrap_error(exc, f"读取属性 {name} 失败") from exc
 
+    @_serialized
     def read_props(self, did: str, names: list[str]) -> dict[str, Any | None]:
         """批量读取同一台设备的多个属性，一次请求替代逐个轮询。
 
@@ -287,6 +314,7 @@ class MijiaService:
                 result[name] = item["value"] if item.get("code") == 0 else None
         return result
 
+    @_serialized
     def write_prop(self, did: str, name: str, value) -> None:
         dev = self._get_device(did)
         try:
@@ -294,6 +322,7 @@ class MijiaService:
         except Exception as exc:
             raise _wrap_error(exc, f"设置属性 {name} 失败") from exc
 
+    @_serialized
     def run_action(self, did: str, name: str, params=None) -> None:
         dev = self._get_device(did)
         try:
@@ -414,6 +443,7 @@ class MijiaService:
 
     # ---------- 开关状态（卡片快速控制用） ----------
 
+    @_serialized
     def power_state(self, did: str) -> bool | None:
         """读取单台设备开关状态；无可写开关属性的设备返回 None。
 
@@ -422,6 +452,7 @@ class MijiaService:
         """
         return self.power_states([did]).get(did)
 
+    @_serialized
     def toggle_power(self, did: str, current: bool | None = None) -> bool:
         """切换到开关的反面，返回新状态。
 
@@ -449,6 +480,7 @@ class MijiaService:
         m = _SUB_DEVICE_SUFFIX.search(str(did))
         return str(did)[:m.start()] if m else None
 
+    @_serialized
     def set_power_state(self, did: str, state: bool) -> None:
         """写入开关状态：spec method 直接构造批量写请求。
 
@@ -483,6 +515,7 @@ class MijiaService:
                 f"设置失败（{item.get('message', '未知错误')}，错误码 {code}）"
             )
 
+    @_serialized
     def power_states(self, dids: list[str]) -> dict[str, bool | None]:
         """批量读取多台设备的开关状态。
 
@@ -674,6 +707,7 @@ class MijiaService:
 
     # ---------- 环境读数（卡片副标题展示用） ----------
 
+    @_serialized
     def read_metrics(self, dids: list[str],
                      selections: dict[str, list[str]] | None = None,
                      climate_out: dict[str, dict[str, float]] | None = None,
@@ -793,6 +827,7 @@ class MijiaService:
                                     for name in _DEFAULT_METRICS if name in got}
         return result
 
+    @_serialized
     def consumable_items(self) -> list[dict]:
         """耗材明细：设备名、耗材描述、当前值、不足阈值与更新时间。
 
@@ -830,6 +865,7 @@ class MijiaService:
             })
         return result
 
+    @_serialized
     def consumable_low_count(self) -> tuple[int, int]:
         """耗材统计：返回 (耗材项数, 不足项数)。"""
         items = self.consumable_items()
@@ -910,6 +946,7 @@ class MijiaService:
                 str(h.get("name") or ""): str(h.get("id") or "") for h in homes}
         return self._home_ids
 
+    @_serialized
     def scene_list(self, home_name: str | None = None) -> list[SceneInfo]:
         """获取手动场景列表；home_name 为 None 时返回全部家庭的场景。"""
         home_id: str | None = None
@@ -936,6 +973,7 @@ class MijiaService:
             for s in scenes
         ]
 
+    @_serialized
     def run_scene(self, scene: SceneInfo) -> None:
         """执行手动场景；上游返回值为假视为失败。"""
         try:
@@ -947,6 +985,7 @@ class MijiaService:
 
     # ---------- 设备图标 ----------
 
+    @_serialized
     def icon_urls(self, models: list[str]) -> dict[str, str | None]:
         """model -> 图标 URL，增量拉取：只对缓存里没有的型号调接口。
 
@@ -991,6 +1030,7 @@ class MijiaService:
             return None
         return ret.headers.get("Location")
 
+    @_serialized
     def icon_file(self, model: str, url: str) -> Path | None:
         """下载图标到本地缓存并返回文件路径；已存在直接返回，失败返回 None。"""
         path = icon_store.icon_path(model)
@@ -1023,6 +1063,7 @@ class MijiaService:
                 result[model] = name
         return result
 
+    @_serialized
     def product_page_name(self, model: str) -> str | None:
         """抓取 miot-spec 产品页（/p/<model>）的中文商品名。
 

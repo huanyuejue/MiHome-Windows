@@ -88,6 +88,13 @@ class WorkbenchPanel(QWidget):
         self._jobs = jobs
         self._current_did: str | None = None
         self._current_online: bool = True
+        # 设备名与房间来自列表数据，不依赖详情是否加载成功：无公开
+        # 规格的设备拉不到详情，仍要能显示名字并支持改名
+        self._current_name: str = ""
+        self._current_room: str = ""
+        # 列表里的设备对象引用：主窗口改名后会原地更新它的 name 与
+        # cloud_name，面板读这个对象才能拿到最新值，而不是打开时的快照
+        self._device: DeviceInfo | None = None
         self._detail: DeviceDetail | None = None
         self._sections: dict[str, QWidget] = {}
         self._module_defs: list[tuple[str, str, str]] = []
@@ -287,6 +294,9 @@ class WorkbenchPanel(QWidget):
         self._clear_workbench()
         name = device.name if device else "设备"
         room = device.room_name if device else ""
+        self._current_name = name
+        self._current_room = room
+        self._device = device
         self._title_label.setText(name)
         self._model_label.setText(room)
         self._title_label.hide()
@@ -336,12 +346,23 @@ class WorkbenchPanel(QWidget):
         self._metrics_btn.show()
         self._edit_btn.show()
 
+    def _default_name(self) -> str:
+        """没有自定义名时该显示的名字（即"恢复默认"的目标）。
+
+        优先用设备对象上的 cloud_name：主窗口本地化设备名时会同步
+        更新它，比详情接口返回的原始名更贴近用户看到的展示名。
+        """
+        if self._device is not None and self._device.cloud_name:
+            return self._device.cloud_name
+        if self._detail is not None:
+            return self._detail.name
+        return self._current_name
+
     def _apply_display_name(self) -> None:
         """按自定义名称的优先级刷新标题与提示标记。"""
-        if self._detail is None:
-            return
+        cloud_name = self._default_name()
         custom = name_override_store.get(self._current_did or "")
-        full = custom or self._detail.name
+        full = custom or cloud_name
         # 标题栏空间有限，超长名字省略显示，完整内容放 tooltip。
         # 可用宽度按面板宽度推算（右侧还有刷新/编辑按钮），窗口很窄
         # 时不能再用固定值，否则文字会溢出到按钮下面。
@@ -382,13 +403,18 @@ class WorkbenchPanel(QWidget):
         self.metrics_config_changed.emit(self._current_did)
 
     def _rename_device(self) -> None:
-        """打开改名对话框；留空或点恢复默认都会还原云端原名。"""
-        if not self._current_did or self._detail is None:
+        """打开改名对话框；留空或点恢复默认都会还原云端原名。
+
+        不依赖详情是否加载成功：无公开规格的设备拉不到详情，
+        但名字仍来自设备列表，照样可以改。
+        """
+        if not self._current_did:
             return
         from app.ui.rename_dialog import RenameDeviceDialog
 
-        current = name_override_store.get(self._current_did) or self._detail.name
-        dialog = RenameDeviceDialog(current, self._detail.name, self)
+        cloud_name = self._default_name()
+        current = name_override_store.get(self._current_did) or cloud_name
+        dialog = RenameDeviceDialog(current, cloud_name, self)
         accepted = dialog.exec() == RenameDeviceDialog.DialogCode.Accepted
         restore = dialog.restoring()
         value = dialog.value()
@@ -633,6 +659,7 @@ class WorkbenchPanel(QWidget):
         self._footer_add_btn.hide()
         self._body.hide()
         self._refresh_btn.hide()
+        self._metrics_btn.hide()
         self._rename_btn.hide()
         self._custom_badge.hide()
 
@@ -1016,6 +1043,10 @@ class WorkbenchPanel(QWidget):
         self._loading.hide()
         self._title_label.show()
         self._model_label.show()
+        # 详情拉不到也要能改名：无公开规格的设备只剩名字可以自定义，
+        # 这里补上标题与改名入口，避免用户无从下手
+        self._apply_display_name()
+        self._rename_btn.show()
         self._load_hint.setText(f"加载失败：{error}")
         self._load_hint.setStyleSheet(
             f"color: {SiColors.ERROR_TEXT}; font-size: 9pt; background: transparent;")
