@@ -13,8 +13,17 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPixmap
+from PySide6.QtCore import (
+    QEasingCurve,
+    QMimeData,
+    QPoint,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import QColor, QDrag, QFont, QPixmap
 from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
@@ -34,13 +43,54 @@ _ICON_SIZE = 32
 # 调窄后默认窗口宽度下恰好 5 列
 _CARD_FIXED_WIDTH = 200
 _CARD_FIXED_HEIGHT = 92
+# 按住多久算长按（毫秒）：比双击间隔长，避免和单击/双击混淆
+_LONG_PRESS_MS = 400
+# 长按期间手指移动超过这个距离就取消：用户是在滚动而不是拖动
+_LONG_PRESS_TOLERANCE = 8
+# 落点卡片的抖动动画时长（毫秒）
+_DROP_TARGET_MS = 220
 
 # 离线卡片的灰置配色：背景更暗、文字更灰，hover 不提亮
+
+
+# 拖拽手柄的横线数量与几何：三条等长横线，视觉上等同常见的抓手图标
+_HANDLE_LINES = 3
+_HANDLE_LINE_W = 12
+_HANDLE_LINE_H = 1.6
+_HANDLE_GAP = 3.5
+
+
+class _DragHandle(QWidget):
+    """排序模式下卡片右上角的抓手：三条横线，与次要文字同色。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtGui import QColor, QPainter
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(SiColors.TEXT_SECONDARY))
+        total = _HANDLE_LINES * _HANDLE_LINE_H + (_HANDLE_LINES - 1) * _HANDLE_GAP
+        top = (self.height() - total) / 2
+        left = (self.width() - _HANDLE_LINE_W) / 2
+        for index in range(_HANDLE_LINES):
+            y = top + index * (_HANDLE_LINE_H + _HANDLE_GAP)
+            painter.drawRoundedRect(
+                QRectF(left, y, _HANDLE_LINE_W, _HANDLE_LINE_H), 1, 1)
+        painter.end()
 
 
 class DeviceCard(SiRowCard):
     power_clicked = Signal(str)  # did
     open_requested = Signal(str)  # did
+    # 长按（普通模式）→ 请求进入排序模式；排序模式下拖动 → 请求拖拽
+    sort_mode_requested = Signal(str)  # noqa: N815 did
+    drag_requested = Signal(str)  # noqa: N815 did
 
     def __init__(self, device: DeviceInfo, parent=None):
         super().__init__(parent, self.LeftToRight)
@@ -48,6 +98,14 @@ class DeviceCard(SiRowCard):
         self._busy = False
         self._hovered = False
         self._online = device.online
+        # 长按拖拽：按住不动超过阈值才算拖动，避免和"单击打开详情"打架
+        self._press_pos: QPoint | None = None
+        self._long_press_timer = QTimer(self)
+        self._long_press_timer.setSingleShot(True)
+        self._long_press_timer.setInterval(_LONG_PRESS_MS)
+        self._long_press_timer.timeout.connect(self._on_long_press)
+        self._drop_target = False
+        self._sort_mode = False
 
         self.style_data.background_color = QColor(
             SiColors.OFFLINE_CARD if not self._online else SiColors.CARD)
@@ -112,6 +170,15 @@ class DeviceCard(SiRowCard):
         lay.addSpacing(6)
         lay.addWidget(text_col, stretch=1)
         lay.addWidget(self._power_btn, alignment=Qt.AlignVCenter)
+
+        # 排序模式下的拖拽手柄：绝对定位在右上角，不参与布局，
+        # 否则会挤占名称区的宽度。用自绘的三条横线而不是字符图标，
+        # 字符在不同字体下粗细与间距都不稳定，看起来像一串散点
+        self._drag_handle = _DragHandle(self)
+        self._drag_handle.setFixedSize(26, 20)
+        self._drag_handle.setCursor(Qt.CursorShape.OpenHandCursor)
+        self._drag_handle.setToolTip("按住拖动可调整顺序")
+        self._drag_handle.hide()
         # 构造时就按固定宽度算一次：部分场景（离屏渲染、还没布局）
         # 不会立刻收到 resizeEvent，先截好避免长名字露出完整内容
         self._update_elided_name()
@@ -181,6 +248,8 @@ class DeviceCard(SiRowCard):
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 命名约定)
         super().resizeEvent(event)
         self._update_elided_name()
+        if self._sort_mode:
+            self._place_drag_handle()
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt 命名约定)
         # 首次显示时布局才真正结算，此时补算一次才能拿到准确宽度
@@ -238,10 +307,57 @@ class DeviceCard(SiRowCard):
         self._apply_card_color()
         super().leaveEvent(event)
 
+    def set_sort_mode(self, active: bool) -> None:
+        """进入/退出排序模式：右上角显示或隐藏拖拽手柄。
+
+        排序模式下卡片任意位置都能直接拖动，不需要再长按；点了退出
+        按钮或拖拽结束后由主窗口统一关掉。
+        """
+        if self._sort_mode == active:
+            return
+        self._sort_mode = active
+        self._drag_handle.setVisible(active)
+        if active:
+            self._place_drag_handle()
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._apply_card_color()
+
+    def _place_drag_handle(self) -> None:
+        self._drag_handle.move(self.width() - self._drag_handle.width() - 8, 6)
+
+    def set_drop_target(self, active: bool) -> None:
+        """拖拽落点高亮：底色提亮 + 轻微放大，提示松手会换到这一格。"""
+        if self._drop_target == active:
+            return
+        self._drop_target = active
+        self._apply_card_color()
+        if active:
+            self._animate_drop_target()
+
+    def _animate_drop_target(self) -> None:
+        """落点被点亮时轻微放大再回弹，把人眼引到即将换位的那一格。
+
+        只在高亮时播一次；取消高亮不播动画，否则会多一次无意义的
+        空动画。缩放只改几何，不改控件尺寸，避免触发整行重排。
+        """
+        base = self.geometry()
+        anim = QPropertyAnimation(self, b"geometry", self)
+        anim.setDuration(_DROP_TARGET_MS)
+        anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        anim.setStartValue(base)
+        anim.setKeyValueAt(0.5, base.adjusted(-3, -3, 3, 3))
+        anim.setEndValue(base)
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
     def _apply_card_color(self) -> None:
         if not self._online:
             # 离线卡片整体灰置，hover 不提亮（无交互暗示）
             self.style_data.background_color = QColor(SiColors.OFFLINE_CARD)
+        elif self._drop_target:
+            # 落点用 hover 底色，比常规卡片亮一档，能一眼看出会换到哪
+            self.style_data.background_color = QColor(SiColors.CARD_HOVER)
         else:
             self.style_data.background_color = QColor(
                 SiColors.CARD_HOVER if self._hovered else SiColors.CARD
@@ -250,13 +366,48 @@ class DeviceCard(SiRowCard):
 
     # ---------- 交互 ----------
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名约定)
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.pos()
+            # 排序模式下不需要长按：按下即可拖动，长按只在普通模式用来
+            # 进入排序模式
+            if not self._sort_mode:
+                self._long_press_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt 命名约定)
+        if self._press_pos is not None:
+            moved = (event.pos() - self._press_pos).manhattanLength()
+            if moved > _LONG_PRESS_TOLERANCE:
+                self._press_pos = None
+                if self._sort_mode:
+                    # 排序模式：移动一小段就直接拖，不用等长按
+                    self.drag_requested.emit(self.device.did)
+                    return
+                # 普通模式：说明用户在拖窗口或滑滚轮，取消这次长按
+                self._long_press_timer.stop()
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt 命名约定)
+        # 长按触发过拖拽时不再当作单击：否则松手会顺带打开详情页
+        dragged = self._press_pos is None
+        self._long_press_timer.stop()
+        self._press_pos = None
         # 先交给基类处理再发信号：open_requested 会同步打开模态详情页，
         # 期间用户可能改名触发网格重建，本卡片被销毁；把信号放最后，
         # 就不会在对象已删除后继续访问它
         super().mouseReleaseEvent(event)
-        # 电源钮自己消费点击事件，能走到这里的都是卡片空白区
-        if event.button() == Qt.LeftButton:
+        # 电源钮自己消费点击事件，能走到这里的都是卡片空白区；
+        # 排序模式下点击不代表打开详情，避免拖拽间隙误触发
+        if (event.button() == Qt.LeftButton and not dragged
+                and not self._sort_mode):
             self.open_requested.emit(self.device.did)
+
+    def _on_long_press(self) -> None:
+        """按住够久：进入排序模式，之后拖动才真正换位。"""
+        if self._press_pos is None or self._sort_mode:
+            return
+        self._press_pos = None
+        self.sort_mode_requested.emit(self.device.did)
 
 

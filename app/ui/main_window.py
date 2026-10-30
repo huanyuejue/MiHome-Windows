@@ -17,9 +17,28 @@ from datetime import datetime
 from pathlib import Path
 
 import shiboken6
-from PySide6.QtCore import QEvent, QPropertyAnimation, QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import (
+    QEvent,
+    QMimeData,
+    QPoint,
+    QPropertyAnimation,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+)
 from PySide6.QtWidgets import QGraphicsOpacityEffect
-from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QCursor,
+    QDrag,
+    QFont,
+    QIcon,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -401,10 +420,18 @@ class MainWindow(QMainWindow):
             "mdi.circle-slice-8", "耗材不足的设备", self._show_consumable_detail)
         self._status_row = QHBoxLayout()
         self._status_row.setSpacing(8)
+        # 排序模式的退出入口：只在排序模式下出现，贴在状态行右侧
+        self._sort_exit_btn = QPushButton("完成")
+        self._sort_exit_btn.setFixedHeight(26)
+        self._sort_exit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sort_exit_btn.setToolTip("退出排序，恢复点击打开详情")
+        self._sort_exit_btn.clicked.connect(self._exit_sort_mode)
+        self._sort_exit_btn.hide()
         for pill in (self._temp_pill, self._humidity_pill,
                      self._light_pill, self._consumable_pill):
             self._status_row.addWidget(pill)
         self._status_row.addStretch(1)
+        self._status_row.addWidget(self._sort_exit_btn)
         content.addLayout(self._status_row)
 
         # ---- 卡片滚动区 ----
@@ -417,6 +444,15 @@ class MainWindow(QMainWindow):
         # 布局只创建一次，重建网格时仅清空条目；反复替换布局会因
         # deleteLater 的延迟执行陷入死循环
         from PySide6.QtWidgets import QGridLayout
+        # 卡片长按拖拽排序：网格容器接收拖放，落点由主窗口统一计算
+        self._grid_host.setAcceptDrops(True)
+        self._grid_host.installEventFilter(self)
+        self._drag_card_did: str | None = None
+        self._drag_scene_id: str | None = None
+        self._drag_hover_did: str | None = None
+        # 排序模式：长按卡片进入，期间所有卡片显示拖拽手柄、点击不再
+        # 打开详情，直到点顶部退出按钮或拖动一次结束
+        self._sort_mode = False
         self._grid = QGridLayout(self._grid_host)
         self._grid.setContentsMargins(0, 4, 0, 12)
         self._grid.setSpacing(14)
@@ -476,6 +512,13 @@ class MainWindow(QMainWindow):
                      self._light_pill, self._consumable_pill):
             pill.setStyleSheet(pill_qss)
             pill.setIcon(qta.icon(pill._icon_name, color=SiColors.TEXT_SECONDARY))
+        # 排序模式的「完成」按钮：与胶囊同高，用主题色实心强调"点这里退出"
+        self._sort_exit_btn.setStyleSheet(
+            f"QPushButton {{ background: {SiColors.THEME}; border: none;"
+            " border-radius: 13px; padding: 0 16px;"
+            f" color: {SiColors.ON_THEME_TEXT}; font-size: 9pt;"
+            " font-weight: 600; }"
+            "QPushButton:hover { border: none; }")
         self._more_menu.setStyleSheet(
             f"QMenu {{ background: {SiColors.CARD}; border: 1px solid {SiColors.BTN_HOVER}; border-radius: 8px; padding: 4px; }}"
             f"QMenu::item {{ color: {SiColors.TEXT_PRIMARY}; padding: 6px 24px 6px 12px; border-radius: 4px; }}"
@@ -1873,6 +1916,23 @@ class MainWindow(QMainWindow):
             and (not self._hide_offline or d.online)
         ]
 
+    def _ordered_devices(self) -> list[DeviceInfo]:
+        """当前可见设备的展示顺序。
+
+        在线优先始终是第一级，手动拖拽只调整同一组内部的先后：这样
+        设备掉线会自动沉到底部，不会因为拖过一次就卡在原来的位置。
+        没有手动顺序时，组内按名称排。
+        """
+        saved = settings_store.get_device_order()
+        rank = {did: i for i, did in enumerate(saved)}
+        # 未记入手动顺序的设备排在已记入的之后，但仍在同一在线分组内
+        unknown = len(rank)
+        return sorted(
+            self._visible_devices(),
+            key=lambda d: (0 if d.online else 1, rank.get(d.did, unknown),
+                           d.name),
+        )
+
     def _device_has_functions(self, device: DeviceInfo) -> bool:
         """None（spec 未拉取）视为有——等首轮轮询证实后再隐藏。"""
         state = self._service.spec_has_published_functions(device.spec_type)
@@ -2084,10 +2144,7 @@ class MainWindow(QMainWindow):
             self._rebuild_scene_grid()
             return
 
-        visible = sorted(
-            self._visible_devices(),
-            key=lambda d: (0 if d.online else 1, d.name),
-        )
+        visible = self._ordered_devices()
         cols = self._columns_for_width(self._scroll.viewport().width())
         self._grid_columns = cols
         rows = (len(visible) + cols - 1) // cols
@@ -2106,13 +2163,31 @@ class MainWindow(QMainWindow):
                 card.set_icon(path)
             card.power_clicked.connect(self._on_power_clicked)
             card.open_requested.connect(self._on_open_device)
+            card.drag_requested.connect(self._start_card_drag)
+            card.sort_mode_requested.connect(self._enter_sort_mode)
+            if self._sort_mode:
+                card.set_sort_mode(True)
             self._cards[device.did] = card
             self._grid.addWidget(card, index // cols, index % cols)
         self._finalize_grid(cols, rows)
 
+    def _ordered_scenes(self) -> list[SceneInfo]:
+        """场景展示顺序：手动拖过的按记录的先后，其余按名称追加。
+
+        与设备卡片同一套思路：只把用户排过的记进设置，没记过的
+        保持默认排法，新增场景不必手动拖也能落到末尾。
+        """
+        saved = settings_store.get_scene_order()
+        rank = {sid: i for i, sid in enumerate(saved)}
+        unknown = len(rank)
+        return sorted(
+            self._scenes or [],
+            key=lambda s: (rank.get(s.scene_id, unknown), s.name),
+        )
+
     def _rebuild_scene_grid(self) -> None:
         """场景视图网格：卡片尺寸与设备卡一致，列数换算直接复用。"""
-        scenes = sorted(self._scenes or [], key=lambda s: s.name)
+        scenes = self._ordered_scenes()
         if not scenes:
             # 空状态：居中提示（含「确认无场景」与加载失败两种来源）
             hint = QLabel("暂无场景，可在米家 APP「智能」中添加")
@@ -2129,6 +2204,10 @@ class MainWindow(QMainWindow):
         for index, scene in enumerate(scenes):
             card = SceneCard(scene)
             card.executed.connect(self._on_scene_executed)
+            card.drag_requested.connect(self._start_scene_drag)
+            card.sort_mode_requested.connect(self._enter_sort_mode)
+            if self._sort_mode:
+                card.set_sort_mode(True)
             self._scene_cards[scene.scene_id] = card
             self._grid.addWidget(card, index // cols, index % cols)
         self._finalize_grid(cols, rows)
@@ -2253,7 +2332,215 @@ class MainWindow(QMainWindow):
                 and event.type() == QEvent.Type.Resize
                 and self.isVisible()):
             self._resize_timer.start()
+        elif obj is self._grid_host and (self._drag_card_did
+                                         or self._drag_scene_id):
+            etype = event.type()
+            if etype in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+                self._highlight_drop_target()
+                event.acceptProposedAction()
+                return True
+            if etype == QEvent.Type.Drop:
+                if self._drag_scene_id:
+                    self._apply_scene_drop()
+                else:
+                    self._apply_card_drop()
+                event.acceptProposedAction()
+                return True
+            if etype == QEvent.Type.DragLeave:
+                self._clear_drop_highlight()
         return super().eventFilter(obj, event)
+
+    # ---------- 卡片拖拽排序 ----------
+
+    def _drag_pixmap(self, card: QWidget) -> QPixmap:
+        """把卡片渲染成圆角浮起图，供拖拽时跟手显示。
+
+        grab() 得到的是整块不透明矩形，圆角外被填成卡片底色，直接
+        当拖拽图会出现两侧黑角。这里按圆角把卡片内容重新合成到透明
+        画布上，圆角外才是真正透明。
+        """
+        card_shot = card.grab()
+        # grab() 出来的图带着窗口的 DPR（如 1.25），绘制时会按逻辑尺寸
+        # 缩回去；而下面的裁剪路径是按像素算的，两套坐标不一致就会只
+        # 裁到一个角。先归一到 1.0，让整条链路只用像素坐标。
+        dpr = card_shot.devicePixelRatio()
+        card_shot.setDevicePixelRatio(1.0)
+        pad = 10
+        canvas = QPixmap(card_shot.width() + pad * 2,
+                         card_shot.height() + pad * 2)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # grab() 抓到的四角是不透明底色，直接贴出来就是两块黑角；
+        # 圆角半径按 DPR 放大，缩放显示后才和卡片本身的圆角一致
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(pad, pad, card_shot.width(),
+                                    card_shot.height()), 14 * dpr, 14 * dpr)
+        painter.setClipPath(clip)
+        painter.drawPixmap(pad, pad, card_shot)
+        painter.end()
+        # 合成阶段只认像素，交还给 Qt 前恢复 DPR：这样拖拽图按逻辑尺寸
+        # 摆放、物理像素与屏幕 1:1，放大绘制才会发虚
+        canvas.setDevicePixelRatio(dpr)
+        return canvas
+
+    def _all_grid_cards(self) -> list:
+        """当前网格里的全部卡片：设备与场景两个视图都算，排序模式要一起管。"""
+        cards = list(self._cards.values())
+        cards.extend(self._scene_cards.values())
+        return cards
+
+    def _start_scene_drag(self, scene_id: str) -> None:
+        """场景卡片拖拽：与设备卡片同一套落点与交换逻辑。"""
+        card = self._scene_cards.get(scene_id)
+        if card is None or not shiboken6.isValid(card):
+            return
+        # 先标记来源视图：落点回调靠它决定去查设备还是场景
+        self._drag_scene_id = scene_id
+        self._run_drag(card, scene_id)
+        self._drag_scene_id = None
+
+    def _scene_under_cursor(self) -> str | None:
+        """鼠标当前压在哪个场景卡片上（不含被拖动的自己）。"""
+        pos = self._grid_host.mapFromGlobal(QCursor.pos())
+        for scene_id, card in self._scene_cards.items():
+            if scene_id == self._drag_scene_id:
+                continue
+            if not shiboken6.isValid(card):
+                continue
+            if card.geometry().contains(pos):
+                return scene_id
+        return None
+
+    def _apply_scene_drop(self) -> None:
+        """松手：只调换这两个场景的相对次序。"""
+        source = self._drag_scene_id
+        target = self._scene_under_cursor()
+        self._clear_drop_highlight()
+        if not source or not target or source == target:
+            return
+        order = [s.scene_id for s in self._ordered_scenes()]
+        if source not in order or target not in order:
+            return
+        i, j = order.index(source), order.index(target)
+        order[i], order[j] = order[j], order[i]
+        settings_store.set_scene_order(order)
+        self._rebuild_grid()
+
+    def _enter_sort_mode(self, did: str) -> None:
+        """长按卡片进入排序模式：所有卡片亮出手柄，点击不再打开详情。"""
+        if self._sort_mode:
+            return
+        self._sort_mode = True
+        for card in self._all_grid_cards():
+            if shiboken6.isValid(card):
+                card.set_sort_mode(True)
+        self._sort_exit_btn.show()
+        Toast.info(self, "拖拽卡片可调整顺序，点「完成」退出", 2600)
+
+    def _exit_sort_mode(self) -> None:
+        """退出排序模式：收起手柄，恢复正常点击行为。"""
+        if not self._sort_mode:
+            return
+        self._sort_mode = False
+        for card in self._all_grid_cards():
+            if shiboken6.isValid(card):
+                card.set_sort_mode(False)
+        self._sort_exit_btn.hide()
+
+    def _start_card_drag(self, did: str) -> None:
+        """启动设备卡片拖拽。"""
+        card = self._cards.get(did)
+        if card is None or not shiboken6.isValid(card):
+            return
+        self._drag_card_did = did
+        self._run_drag(card, did)
+        self._drag_card_did = None
+
+    def _run_drag(self, card: QWidget, ident: str) -> None:
+        """设备与场景共用的拖拽执行：抓图、淡出原位、阻塞等待落点。
+
+        调用方负责事先把 _drag_card_did / _drag_scene_id 置成 ident，
+        落点回调靠它区分是哪个视图；exec 返回后由调用方清空。
+        """
+        self._drag_hover_did = None
+        pixmap = self._drag_pixmap(card)
+        # 原位卡片留个若隐若现的占位，避免拖起来后网格塌陷
+        effect = QGraphicsOpacityEffect(card)
+        effect.setOpacity(0.35)
+        card.setGraphicsEffect(effect)
+        drag = QDrag(card)
+        mime = QMimeData()
+        mime.setText(ident)
+        drag.setMimeData(mime)
+        drag.setPixmap(pixmap)
+        # hotSpot 用逻辑坐标：pixmap 带 DPR 时按物理像素算会偏到一边
+        dpr = pixmap.devicePixelRatio()
+        drag.setHotSpot(QPoint(int(pixmap.width() / dpr / 2),
+                               int(pixmap.height() / dpr / 2)))
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            # exec 返回后拖拽结束：恢复原位卡片并清掉落点高亮
+            if shiboken6.isValid(card):
+                card.setGraphicsEffect(None)
+            self._clear_drop_highlight()
+
+    def _card_under_cursor(self) -> str | None:
+        """鼠标当前压在哪个卡片上（不含被拖动的自己）。"""
+        pos = self._grid_host.mapFromGlobal(QCursor.pos())
+        for did, card in self._cards.items():
+            if did == self._drag_card_did:
+                continue
+            if not shiboken6.isValid(card):
+                continue
+            if card.geometry().contains(pos):
+                return did
+        return None
+
+    def _highlight_drop_target(self) -> None:
+        """把落点卡片底色提亮，让用户看清会换到哪一格。"""
+        if self._drag_scene_id:
+            target = self._scene_under_cursor()
+        else:
+            target = self._card_under_cursor()
+        if target == self._drag_hover_did:
+            return
+        self._clear_drop_highlight()
+        self._drag_hover_did = target
+        card = self._grid_card_by_id(target) if target else None
+        if card is not None and shiboken6.isValid(card):
+            card.set_drop_target(True)
+
+    def _grid_card_by_id(self, ident: str):
+        """按 did 或 scene_id 找卡片：两个视图的 id 不会撞。"""
+        card = self._cards.get(ident)
+        return card if card is not None else self._scene_cards.get(ident)
+
+    def _clear_drop_highlight(self) -> None:
+        card = self._grid_card_by_id(self._drag_hover_did) if self._drag_hover_did else None
+        if card is not None and shiboken6.isValid(card):
+            card.set_drop_target(False)
+        self._drag_hover_did = None
+
+    def _apply_card_drop(self) -> None:
+        """松手：只调换这两张卡片的相对次序，其它卡片原地不动。
+
+        落盘的是"按当前显示顺序重排后的完整列表"，这样两两交换不会
+        波及第三方；同时保证后续新增设备仍按默认规则追加到末尾。
+        """
+        source = self._drag_card_did
+        target = self._card_under_cursor()
+        self._clear_drop_highlight()
+        if not source or not target or source == target:
+            return
+        order = [d.did for d in self._ordered_devices()]
+        if source not in order or target not in order:
+            return
+        i, j = order.index(source), order.index(target)
+        order[i], order[j] = order[j], order[i]
+        settings_store.set_device_order(order)
+        self._rebuild_grid()
 
     # ---------- 快速开关 ----------
 

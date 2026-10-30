@@ -46,6 +46,11 @@ _DEFAULTS: dict = {
     "metrics_selection": {},
     # 托盘图标颜色：system 跟随任务栏深浅，其余为固定色
     "tray_icon_color": "system",
+    # 主页设备卡片的手动顺序（did 列表）。只记录用户拖动过的设备，
+    # 未列出的按默认规则（在线优先 + 名称）排在后面
+    "device_order": [],
+    # 场景卡片的手动顺序（scene_id 列表），语义同 device_order
+    "scene_order": [],
 }
 
 
@@ -242,6 +247,34 @@ def get_hide_no_func_devices() -> bool:
 def set_hide_no_func_devices(value: bool) -> None:
     raw = _read_raw()
     raw["hide_no_func_devices"] = bool(value)
+    _write_raw(raw)
+
+
+def get_device_order() -> list[str]:
+    """主页卡片的手动顺序（did 列表）；空表示按默认规则排序。"""
+    raw = _read_raw().get("device_order")
+    if not isinstance(raw, list):
+        return []
+    return [str(did) for did in raw if isinstance(did, str) and did]
+
+
+def set_device_order(dids: list[str]) -> None:
+    raw = _read_raw()
+    raw["device_order"] = [str(did) for did in dids]
+    _write_raw(raw)
+
+
+def get_scene_order() -> list[str]:
+    """场景卡片的手动顺序（scene_id 列表）；空表示按名称排序。"""
+    raw = _read_raw().get("scene_order")
+    if not isinstance(raw, list):
+        return []
+    return [str(sid) for sid in raw if isinstance(sid, str) and sid]
+
+
+def set_scene_order(scene_ids: list[str]) -> None:
+    raw = _read_raw()
+    raw["scene_order"] = [str(sid) for sid in scene_ids]
     _write_raw(raw)
 
 

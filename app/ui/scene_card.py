@@ -8,15 +8,27 @@
 执行中按钮转忙碌灰置。
 """
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 import qtawesome as qta
 
 from app.core.models import SceneInfo
 from app.siui.components.container import SiRowCard
-from app.ui.device_card import _CARD_FIXED_HEIGHT, _CARD_FIXED_WIDTH
+from app.ui.device_card import (
+    _CARD_FIXED_HEIGHT,
+    _CARD_FIXED_WIDTH,
+    _DragHandle,
+    _LONG_PRESS_MS,
+    _LONG_PRESS_TOLERANCE,
+)
 from app.ui.si_theme import SiColors
 
 _RUN_BTN_SIZE = 36
@@ -26,6 +38,9 @@ class SceneCard(SiRowCard):
     """场景卡片：点击右侧运行按钮触发 executed 信号。"""
 
     executed = Signal(str)  # scene_id
+    # 排序相关：与设备卡片同一套长按/拖拽语义
+    sort_mode_requested = Signal(str)  # noqa: N815 scene_id
+    drag_requested = Signal(str)  # noqa: N815 scene_id
 
     def __init__(self, scene: SceneInfo, parent=None):
         super().__init__(parent, self.LeftToRight)
@@ -77,6 +92,21 @@ class SceneCard(SiRowCard):
         lay.addStretch(1)
         lay.addWidget(self._run_btn, alignment=Qt.AlignVCenter)
 
+        # 排序状态：与设备卡片一致，长按进排序模式后可直接拖动
+        self._sort_mode = False
+        self._drop_target = False
+        self._press_pos: QPoint | None = None
+        self._long_press_timer = QTimer(self)
+        self._long_press_timer.setSingleShot(True)
+        self._long_press_timer.setInterval(_LONG_PRESS_MS)
+        self._long_press_timer.timeout.connect(self._on_long_press)
+        # 拖拽手柄同样绝对定位在右上角，不参与布局
+        self._drag_handle = _DragHandle(self)
+        self._drag_handle.setFixedSize(26, 20)
+        self._drag_handle.setCursor(Qt.CursorShape.OpenHandCursor)
+        self._drag_handle.setToolTip("按住拖动可调整顺序")
+        self._drag_handle.hide()
+
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
         self._run_btn.setEnabled(not busy)
@@ -99,6 +129,66 @@ class SceneCard(SiRowCard):
             f"QPushButton#sceneRunBtn:pressed {{ background: {SiColors.THEME_DIM}; }}"
         )
 
+    # ---------- 排序 ----------
+
+    def set_sort_mode(self, active: bool) -> None:
+        """进入/退出排序模式：右上角显示或隐藏拖拽手柄。"""
+        if self._sort_mode == active:
+            return
+        self._sort_mode = active
+        self._drag_handle.setVisible(active)
+        if active:
+            self._place_drag_handle()
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_drop_target(self, active: bool) -> None:
+        """拖拽落点高亮：底色提亮一档。"""
+        if self._drop_target == active:
+            return
+        self._drop_target = active
+        self._apply_card_color()
+
+    def _place_drag_handle(self) -> None:
+        self._drag_handle.move(self.width() - self._drag_handle.width() - 8, 6)
+
+    def _on_long_press(self) -> None:
+        """按住够久：进入排序模式，之后拖动才真正换位。"""
+        if self._press_pos is None or self._sort_mode:
+            return
+        self._press_pos = None
+        self.sort_mode_requested.emit(self.scene.scene_id)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.pos()
+            # 排序模式下按下即可拖动，长按只用来进入排序模式
+            if not self._sort_mode:
+                self._long_press_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press_pos is not None:
+            moved = (event.pos() - self._press_pos).manhattanLength()
+            if moved > _LONG_PRESS_TOLERANCE:
+                self._press_pos = None
+                if self._sort_mode:
+                    self.drag_requested.emit(self.scene.scene_id)
+                    return
+                self._long_press_timer.stop()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._long_press_timer.stop()
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._sort_mode:
+            self._place_drag_handle()
+
     # ---------- hover 观感 ----------
 
     def enterEvent(self, event) -> None:  # noqa: N802 (Qt 命名约定)
@@ -112,8 +202,10 @@ class SceneCard(SiRowCard):
         super().leaveEvent(event)
 
     def _apply_card_color(self) -> None:
+        # 落点高亮优先于 hover：拖拽时用户要看的是"会换到哪一格"
         self.style_data.background_color = QColor(
-            SiColors.CARD_HOVER if self._hovered else SiColors.CARD
+            SiColors.CARD_HOVER if (self._hovered or self._drop_target)
+            else SiColors.CARD
         )
         self.update()
 
