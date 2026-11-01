@@ -13,12 +13,13 @@
 
 from pathlib import Path
 
+import qtawesome as qta
+
 from PySide6.QtCore import (
     QEasingCurve,
     QMimeData,
     QPoint,
     QPropertyAnimation,
-    QRectF,
     Qt,
     QTimer,
     Signal,
@@ -49,39 +50,43 @@ _LONG_PRESS_MS = 400
 _LONG_PRESS_TOLERANCE = 8
 # 落点卡片的抖动动画时长（毫秒）
 _DROP_TARGET_MS = 220
+# 卡片内容的上下左右留白：布局与拖拽手柄共用同一套值，
+# 手柄才能和文字、电源钮对齐而不是压在边框上
+_CARD_PAD_TOP = 10
+_CARD_PAD_RIGHT = 14
+# 手柄比内容右边界再靠右一些：它只是个角标，不需要和正文严格同列
+_HANDLE_PAD_RIGHT = 1
 
 # 离线卡片的灰置配色：背景更暗、文字更灰，hover 不提亮
 
 
-# 拖拽手柄的横线数量与几何：三条等长横线，视觉上等同常见的抓手图标
-_HANDLE_LINES = 3
-_HANDLE_LINE_W = 12
-_HANDLE_LINE_H = 1.6
-_HANDLE_GAP = 3.5
+# 拖拽手柄图标：与托盘管理里的排序抓手同一个点阵图标，两处观感统一。
+# 尺寸比托盘里的大一圈：主页卡片本身更大，太小会显得像噪点
+_HANDLE_ICON = "mdi.drag"
+_HANDLE_ICON_PX = 20
+_HANDLE_BOX = 24
 
 
 class _DragHandle(QWidget):
-    """排序模式下卡片右上角的抓手：三条横线，与次要文字同色。"""
+    """排序模式下卡片右上角的抓手：复用托盘的 mdi.drag 点阵图标。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._pixmap = qta.icon(
+            _HANDLE_ICON, color=SiColors.TEXT_MUTED).pixmap(
+                _HANDLE_ICON_PX, _HANDLE_ICON_PX)
 
     def paintEvent(self, event) -> None:  # noqa: N802
-        from PySide6.QtGui import QColor, QPainter
+        from PySide6.QtGui import QPainter
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(SiColors.TEXT_SECONDARY))
-        total = _HANDLE_LINES * _HANDLE_LINE_H + (_HANDLE_LINES - 1) * _HANDLE_GAP
-        top = (self.height() - total) / 2
-        left = (self.width() - _HANDLE_LINE_W) / 2
-        for index in range(_HANDLE_LINES):
-            y = top + index * (_HANDLE_LINE_H + _HANDLE_GAP)
-            painter.drawRoundedRect(
-                QRectF(left, y, _HANDLE_LINE_W, _HANDLE_LINE_H), 1, 1)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        # 图标在方框内居中：点阵图案本身比方框小一圈，直接贴会偏左上
+        x = (self.width() - self._pixmap.width()) // 2
+        y = (self.height() - self._pixmap.height()) // 2
+        painter.drawPixmap(x, y, self._pixmap)
         painter.end()
 
 
@@ -165,17 +170,16 @@ class DeviceCard(SiRowCard):
 
         lay = self.layout()
         # 左右边距与图标间距收紧，把宽度尽量留给设备名
-        lay.setContentsMargins(12, 10, 14, 10)
+        lay.setContentsMargins(12, _CARD_PAD_TOP, _CARD_PAD_RIGHT, 10)
         lay.addWidget(self._icon_label, alignment=Qt.AlignVCenter)
         lay.addSpacing(6)
         lay.addWidget(text_col, stretch=1)
         lay.addWidget(self._power_btn, alignment=Qt.AlignVCenter)
 
         # 排序模式下的拖拽手柄：绝对定位在右上角，不参与布局，
-        # 否则会挤占名称区的宽度。用自绘的三条横线而不是字符图标，
-        # 字符在不同字体下粗细与间距都不稳定，看起来像一串散点
+        # 否则会挤占名称区的宽度
         self._drag_handle = _DragHandle(self)
-        self._drag_handle.setFixedSize(26, 20)
+        self._drag_handle.setFixedSize(_HANDLE_BOX, _HANDLE_BOX)
         self._drag_handle.setCursor(Qt.CursorShape.OpenHandCursor)
         self._drag_handle.setToolTip("按住拖动可调整顺序")
         self._drag_handle.hide()
@@ -325,7 +329,11 @@ class DeviceCard(SiRowCard):
         self._apply_card_color()
 
     def _place_drag_handle(self) -> None:
-        self._drag_handle.move(self.width() - self._drag_handle.width() - 8, 6)
+        # 顶部与内容对齐，右侧比正文更靠外一档：手柄是角标性质，
+        # 严格贴着正文列反而显内缩
+        self._drag_handle.move(
+            self.width() - _HANDLE_PAD_RIGHT - self._drag_handle.width(),
+            _CARD_PAD_TOP)
 
     def set_drop_target(self, active: bool) -> None:
         """拖拽落点高亮：底色提亮 + 轻微放大，提示松手会换到这一格。"""

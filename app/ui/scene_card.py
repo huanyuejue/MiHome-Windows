@@ -26,10 +26,16 @@ from app.ui.device_card import (
     _CARD_FIXED_HEIGHT,
     _CARD_FIXED_WIDTH,
     _DragHandle,
+    _HANDLE_BOX,
+    _HANDLE_PAD_RIGHT,
     _LONG_PRESS_MS,
     _LONG_PRESS_TOLERANCE,
 )
 from app.ui.si_theme import SiColors
+
+# 卡片内容留白：与布局共用，拖拽手柄靠它对齐到内容区而不是边框
+_SCENE_PAD_TOP = 10
+_SCENE_PAD_RIGHT = 18
 
 _RUN_BTN_SIZE = 36
 
@@ -87,7 +93,7 @@ class SceneCard(SiRowCard):
         text_lay.addStretch(1)
 
         lay = self.layout()
-        lay.setContentsMargins(18, 10, 18, 10)
+        lay.setContentsMargins(18, _SCENE_PAD_TOP, _SCENE_PAD_RIGHT, 10)
         lay.addWidget(text_col)
         lay.addStretch(1)
         lay.addWidget(self._run_btn, alignment=Qt.AlignVCenter)
@@ -102,7 +108,7 @@ class SceneCard(SiRowCard):
         self._long_press_timer.timeout.connect(self._on_long_press)
         # 拖拽手柄同样绝对定位在右上角，不参与布局
         self._drag_handle = _DragHandle(self)
-        self._drag_handle.setFixedSize(26, 20)
+        self._drag_handle.setFixedSize(_HANDLE_BOX, _HANDLE_BOX)
         self._drag_handle.setCursor(Qt.CursorShape.OpenHandCursor)
         self._drag_handle.setToolTip("按住拖动可调整顺序")
         self._drag_handle.hide()
@@ -151,7 +157,11 @@ class SceneCard(SiRowCard):
         self._apply_card_color()
 
     def _place_drag_handle(self) -> None:
-        self._drag_handle.move(self.width() - self._drag_handle.width() - 8, 6)
+        # 顶部与内容对齐，右侧比正文更靠外一档：手柄是角标性质，
+        # 严格贴着正文列反而显内缩
+        self._drag_handle.move(
+            self.width() - _HANDLE_PAD_RIGHT - self._drag_handle.width(),
+            _SCENE_PAD_TOP)
 
     def _on_long_press(self) -> None:
         """按住够久：进入排序模式，之后拖动才真正换位。"""
