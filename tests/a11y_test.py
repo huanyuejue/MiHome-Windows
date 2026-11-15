@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """无障碍桥接层（app/ui/a11y.py）离屏回归测试。
 
-覆盖九件事：
+覆盖十件事：
 1. 读屏能读到：图标按钮、设备/场景卡片、电源三态、设置开关、房间选项卡、
    状态胶囊、对话框标题都有可访问名称，且状态变化会同步。
 2. 读屏能操作：自绘卡片可聚焦，空格/回车转发到**既有**信号或方法。
@@ -34,6 +34,11 @@
    HelpText 都不变；四个无名下拉框补上缺失的用途名。下拉框末尾的
    「下方向」也不再读：代理接口只把 Accelerator 报空，名称、当前值、
    描述、子节点、角色与状态全部委托给 Qt 原生接口。
+10. 桌面挂件与语音悬浮球也能用键盘操作：挂件卡片可 Tab 聚焦、空格切
+   电源 / 回车打开详情、场景卡执行场景，卡片内动作钮退出 Tab 链；图标
+   工具钮补上用途名且 tooltip 不被回退念第二遍；锁定态有纯键盘解锁入口；
+   悬浮球与两个语音输入框有固定名称，收起面板后焦点回到球。普通用户的
+   样式、tooltip、鼠标路径、既有信号与显示文字全部不变。
 
 与项目其它 GUI 测试一样：离屏运行、数据目录隔离、不联网、不需要米家账号。
 
@@ -154,7 +159,7 @@ assert _power_state(probe) == "正在操作"
 probe.set_busy(False)
 probe.set_online(False)
 assert _power_state(probe) == "离线"
-print("[1/9] 电源三态与图标字形文案 OK")
+print("[1/10] 电源三态与图标字形文案 OK")
 
 
 # ---------- 2. 图标按钮：tooltip 变成可访问名称 ----------
@@ -174,7 +179,7 @@ scroll_bar = QScrollBar()
 bridge.scan()
 assert scroll_bar.accessibleName() == "", \
     f"滚动条被误命名: {scroll_bar.accessibleName()}"
-print("[2/9] 图标按钮 / 字形按钮 / 状态胶囊名称 OK")
+print("[2/10] 图标按钮 / 字形按钮 / 状态胶囊名称 OK")
 
 
 # ---------- 3. 设备卡片：名称、状态同步、焦点策略 ----------
@@ -229,7 +234,7 @@ assert "已关闭" in card.accessibleName(), card.accessibleName()
 assert "已关闭" in power.accessibleName(), power.accessibleName()
 card.set_power_state(True)
 bridge.scan()
-print("[3/9] 设备卡片名称 / 状态同步 / 焦点策略 OK")
+print("[3/10] 设备卡片名称 / 状态同步 / 焦点策略 OK")
 
 
 # ---------- 4. 零侵入：普通用户的视觉与鼠标路径逐项不变 ----------
@@ -243,7 +248,7 @@ assert ("mousePressEvent" in card.__dict__) == before["press_patched"]
 assert "mouseReleaseEvent" not in card.__dict__, \
     "桥接层给卡片打了鼠标事件猴补丁"
 assert "mousePressEvent" not in card.__dict__
-print("[4/9] 样式 / 尺寸 / 光标 / 鼠标事件零改动 OK")
+print("[4/10] 样式 / 尺寸 / 光标 / 鼠标事件零改动 OK")
 
 
 # ---------- 5. 键盘等价与鼠标路径共存 ----------
@@ -269,7 +274,7 @@ assert opened == ["d1"], f"鼠标点击打开详情的路径被破坏: {opened}"
 switched.clear()
 mouse_click(power)
 assert switched == ["d1"], f"NoFocus 后鼠标点电源钮失效: {switched}"
-print("[5/9] 键盘激活与鼠标路径（含点击电源钮）各自正常 OK")
+print("[5/10] 键盘激活与鼠标路径（含点击电源钮）各自正常 OK")
 
 
 # ---------- 6. 场景卡片与电源属性行 ----------
@@ -550,7 +555,7 @@ named_scroll.show()
 bridge.scan()
 assert not _is_plain_scroll_area(named_scroll)
 assert named_scroll.focusPolicy() == Qt.FocusPolicy.StrongFocus
-print("[6/9] 场景卡片 / 属性电源行 / 滑块键盘调节 / 无名滚动容器 OK")
+print("[6/10] 场景卡片 / 属性电源行 / 滑块键盘调节 / 无名滚动容器 OK")
 
 
 # ---------- 7. 设置开关、房间选项卡、对话框标题 ----------
@@ -868,7 +873,7 @@ outside_iface = QAccessible.queryAccessibleInterface(outside)
 assert not isinstance(outside_iface, _QuietComboBoxAccessible), \
     "非下拉框控件不该被代理"
 assert editable_combo.lineEdit() is not None, "可输入下拉框仍要能筛选"
-print("[7/9] 设置开关 / 勾选框 / 抽屉 / 符号按钮 / 房间默认 / 定时任务 / 下方向 OK")
+print("[7/10] 设置开关 / 勾选框 / 抽屉 / 符号按钮 / 房间默认 / 定时任务 / 下方向 OK")
 
 
 # ---------- 7e. 托盘快捷窗口：电源钮补上设备名与房间 ----------
@@ -1637,7 +1642,91 @@ bridge.scan()
 bridge.scan()
 assert card.accessibleName() == stable, "反复扫描结果应稳定（幂等）"
 assert card.focusPolicy() != Qt.FocusPolicy.NoFocus
-print("[8/9] 播报区域 / 快捷键 / 幂等性 OK")
+print("[8/10] 播报区域 / 快捷键 / 幂等性 OK")
+
+
+# ---------- 8a. Alt+1..9 切选项卡后焦点落到按钮 ----------
+# 用户反馈：只 click() 不移动焦点，读屏不播报；期望与 Tab 走过去一致，
+# 读成「场景 复选框 已选中」/「全屋 复选框 已选中」。
+from PySide6.QtGui import QKeySequence  # noqa: E402
+
+_tab_names = ("场景", "全屋", "大厅")
+_tab_buttons = {name: themed_tab_button(name) for name in _tab_names}
+for _b in _tab_buttons.values():
+    _b.setParent(host)
+    _b.show()
+_selected = {"name": None}
+
+
+def _select_tab(name, btn):
+    # 模拟业务的 _select_room + _sync_tab_style：只翻 checked 状态
+    _selected["name"] = name
+    for _x in _tab_buttons.values():
+        _x.setChecked(False)
+    btn.setChecked(True)
+
+
+for _name, _b in _tab_buttons.items():
+    _b.clicked.connect(lambda _=False, n=_name, b=_b: _select_tab(n, b))
+
+host._tab_buttons = _tab_buttons
+_select_tab("全屋", _tab_buttons["全屋"])
+bridge._kb_focus_key = None
+bridge.scan()  # 与真实界面一样，让桥接层装饰这组按钮
+QApplication.setActiveWindow(host)
+host.activateWindow()
+_tab_buttons["大厅"].setFocus(Qt.FocusReason.OtherFocusReason)
+_spin(30)
+assert QApplication.focusWidget() is _tab_buttons["大厅"], "前置焦点应在别的控件"
+
+
+def _shortcut(seq):
+    for _sc in host._a11y_shortcuts:
+        if _sc.key() == QKeySequence(seq):
+            return _sc
+    return None
+
+
+_sc1, _sc2 = _shortcut("Alt+1"), _shortcut("Alt+2")
+assert _sc1 is not None and _sc2 is not None
+
+_sc1.activated.emit()
+_spin(30)
+assert _selected["name"] == "场景", "Alt+1 应切到第一个选项卡"
+assert _tab_buttons["场景"].isChecked()
+assert not _tab_buttons["全屋"].isChecked()
+assert QApplication.focusWidget() is _tab_buttons["场景"], \
+    "焦点须落在已选中的选项卡，读屏才会念「场景 复选框 已选中」"
+assert QApplication.focusWidget().accessibleName() == "场景"
+
+_sc2.activated.emit()
+_spin(30)
+assert _selected["name"] == "全屋"
+assert QApplication.focusWidget() is _tab_buttons["全屋"], \
+    "Alt+2 同理应念「全屋 复选框 已选中」"
+assert QApplication.focusWidget().accessibleName() == "全屋"
+
+# 只有 3 个选项卡：Alt+4..Alt+9 必须完全静默（不切、不移焦点、不播报）
+_live_before = find_live_region().accessibleName()
+for _n in range(4, 10):
+    _sc_extra = _shortcut(f"Alt+{_n}")
+    assert _sc_extra is not None
+    _sc_extra.activated.emit()
+    _spin(10)
+assert QApplication.focusWidget() is _tab_buttons["全屋"]
+assert _selected["name"] == "全屋"
+assert find_live_region().accessibleName() == _live_before, \
+    "越界按键不应产生任何播报"
+print("[8a] Alt+1..9 切选项卡后焦点落到按钮、越界静默 OK")
+
+# 清理现场，避免影响后续组的焦点断言
+bridge._kb_focus_key = None
+for _b in _tab_buttons.values():
+    _b.hide()
+    _b.deleteLater()
+host._tab_buttons = {}
+host.setFocus()
+_spin(30)
 
 
 # ---------- 9. 文案精简：只补缺失的文字，不重复读屏已有的信息 ----------
@@ -1668,6 +1757,199 @@ for widget in QApplication.allWidgets():
         assert not widget.autoDefault(), (
             f"{type(widget).__name__} 仍是 autoDefault，UIA 会报 Enter 快捷键")
 assert named >= 10, f"参与检查的具名控件太少: {named}"
-print("[9/9] 文案精简：无控件类型 / 选中态 / 操作提示 / HelpText OK")
+print("[9/10] 文案精简：无控件类型 / 选中态 / 操作提示 / HelpText OK")
+
+# ---------- 10. 桌面挂件 / 语音悬浮球：键盘导航与焦点停靠 ----------
+from app.core import board_store as _board_store  # noqa: E402
+from app.ui.voice_fab import VoiceFab  # noqa: E402
+from app.ui.widgets_board import WidgetsBoard  # noqa: E402
+
+_bdevs = [
+    DeviceInfo(did="bd1", name="储藏室灯", model="demo.light",
+               home_name="我的家", room_name="储藏室", online=True),
+]
+_board_store.save_devices(["bd1"])
+_board_store.save_scenes([
+    {"scene_id": "bs1", "name": "晚安模式", "home_id": "h1",
+     "home_name": "我的家"},
+])
+_board_store.save_order([{"type": "device", "id": "bd1"},
+                         {"type": "scene", "id": "bs1"}])
+_bbackend = _FocusBackend()
+_board = WidgetsBoard(_bbackend, _bbackend)
+_board.set_devices(_bdevs, {"bd1": False})
+_board.show()
+_spin(30)
+bridge.scan()
+_spin(10)
+
+_bcard = _board._cards["bd1"]
+_bscene = _board._scene_cards["bs1"]
+assert _bcard.accessibleName() == "储藏室灯，储藏室，在线，已关闭", \
+    _bcard.accessibleName()
+assert _bscene.accessibleName() == "晚安模式，我的家", _bscene.accessibleName()
+assert _bcard.focusPolicy() != Qt.FocusPolicy.NoFocus, "挂件设备卡应可 Tab 聚焦"
+assert _bscene.focusPolicy() != Qt.FocusPolicy.NoFocus, "挂件场景卡应可 Tab 聚焦"
+assert _bcard._power_btn.focusPolicy() == Qt.FocusPolicy.NoFocus, \
+    "卡片已承担键盘激活，卡内电源钮不该再占一个 Tab 焦点"
+assert _bscene._run_btn.focusPolicy() == Qt.FocusPolicy.NoFocus, \
+    "卡片已承担键盘激活，卡内执行钮不该再占一个 Tab 焦点"
+assert "储藏室灯" in _bcard._power_btn.accessibleName(), \
+    _bcard._power_btn.accessibleName()
+assert "晚安模式" in _bscene._run_btn.accessibleName(), \
+    _bscene._run_btn.accessibleName()
+
+# 图标工具钮：名称取 tooltip、tooltip 本身不动、FullDescription 不再重复念
+for _btn in [_board._lock_toggle, _board._pin_toggle,
+             _board._collapse_btn, _board._lock_btn] + list(_board._tool_buttons):
+    _tip = _btn.toolTip().strip()
+    assert _btn.accessibleName(), f"挂件工具钮缺名称: {_tip}"
+    assert _tip in _btn.accessibleName() or _btn.objectName() == "powerBtn", \
+        (_tip, _btn.accessibleName())
+    assert not _btn.accessibleDescription().strip(), \
+        f"tooltip 会被回退进 FullDescription 再念一遍: {_tip}"
+assert _board._lock_btn.accessibleName() == "解锁", \
+    _board._lock_btn.accessibleName()
+assert _board._lock_toggle.toolTip() == "锁定", "视觉 tooltip 一字不改"
+assert _board._scroll.focusPolicy() == Qt.FocusPolicy.NoFocus, \
+    "无名滚动容器不该在 Tab 链里留下「分组」"
+
+# 空格切电源：转发卡内电源钮既有的 clicked，忙碌禁用不抢卡片焦点
+_bopened: list[str] = []
+_board.open_device_requested.connect(lambda did: _bopened.append(did))
+_bbackend.pending.clear()
+_bcard.setFocus(Qt.FocusReason.TabFocusReason)
+_spin(10)
+key_press(_bcard, Qt.Key.Key_Space)
+assert _bbackend.pending, "空格应下发电源写入任务"
+assert _board._known_power["bd1"] is True, "空格应乐观翻转电源"
+assert QApplication.focusWidget() is _bcard, \
+    "忙碌禁用的是子按钮，卡片焦点不该漂移"
+_bbackend.finish()
+_spin(10)
+bridge.scan()
+assert "已开启" in _bcard.accessibleName(), _bcard.accessibleName()
+
+# 回车打开设备详情：与鼠标点卡片空白区走同一个信号，不碰电源
+_bbackend.pending.clear()
+_bopened.clear()
+_bcard.setFocus(Qt.FocusReason.TabFocusReason)
+_spin(10)
+key_press(_bcard, Qt.Key.Key_Return)
+assert _bopened == ["bd1"], f"回车应打开 bd1 详情: {_bopened}"
+assert not _bbackend.pending, "回车不能下发电源写入任务"
+
+# 场景卡：空格 / 回车都执行场景，业务忙碌禁用与恢复照旧
+for _k in (Qt.Key.Key_Space, Qt.Key.Key_Return):
+    _bbackend.pending.clear()
+    _bscene.setFocus(Qt.FocusReason.TabFocusReason)
+    _spin(10)
+    key_press(_bscene, _k)
+    assert _bbackend.pending, "挂件场景卡应执行场景"
+    assert not _bscene._run_btn.isEnabled(), "业务执行中置灰应保留"
+    _bbackend.finish()
+    _spin(10)
+    assert _bscene._run_btn.isEnabled(), "执行结束后按钮应恢复"
+
+# 锁定态隐藏整条标题栏：键盘用户靠窗口快捷键解锁（转发既有 set_locked）
+_bshortcut = getattr(_board, "_a11y_lock_shortcut", None)
+assert _bshortcut is not None, "挂件窗口应有纯键盘解锁入口"
+_bwas_locked = _board.is_locked()
+_bshortcut.activated.emit()
+assert _board.is_locked() is not _bwas_locked, "快捷键应切换锁定态"
+_bshortcut.activated.emit()
+assert _board.is_locked() is _bwas_locked, "再按一次应切回原状态"
+assert _board._lock_toggle.toolTip() == "锁定", "锁定往返不改 tooltip"
+
+# 折叠 / 展开会整窗重建卡片：重建后仍具名、仍可 Tab 聚焦
+_board._collapse_btn.click()
+assert _board.collapsed is True
+_bexpand = next(b for b in _board._tool_buttons if b.toolTip() == "展开挂件")
+assert _bexpand.accessibleName() == "展开挂件", _bexpand.accessibleName()
+_bexpand.click()
+assert _board.collapsed is False
+bridge.scan()
+_bcard2 = _board._cards["bd1"]
+assert _bcard2.accessibleName().startswith("储藏室灯"), _bcard2.accessibleName()
+assert _bcard2.focusPolicy() != Qt.FocusPolicy.NoFocus
+
+# 语音悬浮球：球 / 输入框固定名称，tooltip 与打字机 placeholder 都不干扰
+_fab = VoiceFab(host)
+_fab.show()
+# 离屏环境里挂件窗口刚 show 过，活动窗口不是主窗口；真实桌面会话中
+# 语音球所在的主窗口必然是活动窗口，setFocus 才有效。
+QApplication.setActiveWindow(host)
+host.activateWindow()
+_spin(30)
+bridge.scan()
+assert _fab._ball.accessibleName() == "小爱同学 · 自然语言控制", \
+    _fab._ball.accessibleName()
+assert _fab._ball.accessibleName() == _fab._ball.toolTip(), \
+    "球的名称应沿用业务 tooltip 原文，不另起简称"
+assert _fab._ball.toolTip() == "小爱同学 · 自然语言控制", "tooltip 一字不改"
+assert not _fab._ball.accessibleDescription().strip(), \
+    "球的 tooltip 不该回退进 FullDescription 再念一遍"
+assert _fab._edit.accessibleName() == "语音指令", _fab._edit.accessibleName()
+assert _fab._ball.focusPolicy() != Qt.FocusPolicy.NoFocus
+assert _fab._edit.focusPolicy() != Qt.FocusPolicy.NoFocus
+assert getattr(_fab, "_a11y_collapse_original", None) is not None, \
+    "collapse 应被包一层以回收焦点"
+
+# 空格展开 → 焦点进输入框；打字机逐字改 placeholder，名称保持稳定
+key_tap(_fab._ball, Qt.Key.Key_Space)
+_spin(30)
+assert _fab._expanded, "空格应展开语音指令面板"
+assert QApplication.focusWidget() is _fab._edit, "展开后焦点应进入输入框"
+_fab._edit.setPlaceholderText("对小爱同学下指令，如")
+bridge.scan()
+assert _fab._edit.accessibleName() == "语音指令", \
+    "placeholder 动画不能改写可访问名称"
+
+# Esc 收起：业务 collapse 照常，焦点回到球而不是丢在隐藏的输入框上
+app.sendEvent(_fab._edit, QKeyEvent(
+    QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+_spin(20)
+assert not _fab._expanded, "Esc 应收起面板"
+assert QApplication.focusWidget() is _fab._ball, \
+    "Esc 收起后焦点应回到悬浮球"
+
+# 回车提交：既有 submitted 信号照常，收起后焦点同样回球
+_fab_submitted: list[str] = []
+_fab.submitted.connect(lambda t: _fab_submitted.append(t))
+key_tap(_fab._ball, Qt.Key.Key_Space)
+_spin(20)
+_fab._edit.setText("打开卧室灯")
+key_press(_fab._edit, Qt.Key.Key_Return)
+_spin(20)
+assert _fab_submitted == ["打开卧室灯"], _fab_submitted
+assert not _fab._expanded, "提交后面板应收起"
+assert QApplication.focusWidget() is _fab._ball, \
+    "提交收起后焦点应回到悬浮球"
+
+# 托盘语音条用同一个打字机组件，名称同样固定
+assert _ewin._voice_edit.accessibleName() == "语音指令", \
+    _ewin._voice_edit.accessibleName()
+
+# 新建控件同样接受「文案只补缺失文字」与「HelpText 恒空」的全局检查
+for _widget in QApplication.allWidgets():
+    _nm = _widget.accessibleName() or ""
+    for _noise in NOISE:
+        assert _noise not in _nm, (
+            f"{type(_widget).__name__} 名称含冗余文案「{_noise}」: {_nm}")
+    assert not (_widget.accessibleDescription() or "").strip(), (
+        f"{type(_widget).__name__} 写了 HelpText: "
+        f"{_widget.accessibleDescription()}")
+    if isinstance(_widget, QPushButton):
+        assert not _widget.autoDefault(), \
+            f"{type(_widget).__name__} 仍是 autoDefault"
+
+# 反复扫描幂等
+_bname = _bcard2.accessibleName()
+_fname = _fab._ball.accessibleName()
+bridge.scan()
+bridge.scan()
+assert _bcard2.accessibleName() == _bname
+assert _fab._ball.accessibleName() == _fname
+print("[10/10] 桌面挂件 / 语音悬浮球：名称 / 焦点 / 键盘 / 零侵入 OK")
 
 print("\na11y_test: 全部通过（离屏、无需米家账号、未改动真实配置）")
