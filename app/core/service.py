@@ -106,7 +106,13 @@ def _serialized(method):
     """把服务方法串到实例锁上，避免多线程同时碰上游客户端。"""
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        with self._lock:
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            # 少数调用方会绕过 __init__ 直接建实例（测试替身、将来的
+            # 反序列化构造），这里补一把，保证装饰器永远可用
+            lock = threading.RLock()
+            self._lock = lock
+        with lock:
             return method(self, *args, **kwargs)
 
     return wrapper
