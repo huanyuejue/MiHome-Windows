@@ -76,6 +76,18 @@ def _apply_ui_scale_env() -> None:
     os.environ["QT_SCALE_FACTOR"] = f"{_BASE_UI_SCALE * get_ui_scale():g}"
 
 
+def _enable_qt_accessibility() -> None:
+    """强制激活 Qt 的 Windows UIA 无障碍桥接。
+
+    ``qwindows.dll`` 里已静态编入 QWindowsUia，但 Qt 默认只在检测到 UIA
+    客户端时才惰性激活；读屏软件晚于应用启动时，首个窗口的可访问树可能
+    来不及建立。设为 1 让桥接从一开始就就绪。对不使用辅助技术的用户
+    没有任何视觉或交互影响，也不额外加载 DLL。若用户显式设了值（含 0）
+    则尊重用户选择。
+    """
+    os.environ.setdefault("QT_ACCESSIBILITY", "1")
+
+
 def _install_qt_translator(app) -> None:
     """加载 Qt 自带控件的中文翻译，兼容源码与 Nuitka 打包两种布局。
 
@@ -123,7 +135,14 @@ def main() -> int:
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     _apply_ui_scale_env()
+    _enable_qt_accessibility()
     app = QApplication(sys.argv)
+
+    # 无障碍桥接必须在任何控件创建之前安装：全局事件过滤器要能捕获
+    # 后续所有 widget 的 Show / ChildAdded，才能补上名称、焦点与键盘入口。
+    # 纯加法，不改变既有绘制与鼠标交互；详见 app/ui/a11y.py。
+    from app.ui.a11y import install_accessibility
+    app._a11y_bridge = install_accessibility(app)  # type: ignore[attr-defined]
 
     # Qt 自带控件的文案（取色板、消息框按钮等）按系统语言加载翻译：
     # 不加载时 QColorDialog 会整屏英文（"Basic colors"/"OK"/"Cancel"）
