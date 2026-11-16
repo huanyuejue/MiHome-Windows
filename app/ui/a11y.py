@@ -156,6 +156,25 @@ Qt6 的 Windows UIA 桥接（``QWindowsUia``）本身是可用的（静态编在
     各补一个固定用途名，并把 ``collapse()`` 包一层：只要焦点在输入框上，
     收起时（Esc / 回车提交 / 外部刷新）焦点回到球，读屏不会在面板隐藏后
     失去停靠点。同款打字机输入框在托盘语音条里也补同一个名称。
+18. **外显值要跟着 Tab 念出来**。设备详情里「外显值设置」挑的属性读数
+    由主窗口 ``set_metrics()`` 就地写进卡片副标题（``房间 | 读数``），可
+    自绘卡片的可访问名称只由设备名 / 房间 / 在线 / 开关拼成，读屏 Tab 到
+    卡片时听不到副标题上那串值。这里直接复用**业务已经排版好的副标题**
+    （不重算、不读设置、不改写入时机），把 ``|`` 后的读数原文追加到卡片
+    名称末尾：主界面 ``DeviceCard``、桌面挂件 ``_BoardCard``、托盘快捷行
+    的设备电源钮都覆盖到；托盘行的副标题会被宽度省略，改取窗口里未省略
+    的 ``_metrics`` 原文。离线时业务本来就不显示读数，名称里也不补。
+    读数变化时名称随 800ms 扫描同步；名称里没有状态词变化，因此不会触发
+    主动播报，只有 Tab 经过时读屏才念。显示文字、QSS、布局、鼠标事件、
+    轮询与既有信号一律不变。
+19. **定时任务规则开关要念出整条规则**。规则行从左到右画着设备名、
+    房间（离线时是「房间 · 离线」）、「时刻 每天」、动作四个 ``QLabel``，
+    但通用规则只取同行第一个标签，读屏于是只念「智能插座 复选框 已选中」，
+    同一台设备配了多条规则时完全分不清。这里按对话框自有的
+    ``_switches`` / ``_rows`` 精确认出规则开关，把该行四个标签的原文按
+    布局顺序拼进名称（``智能插座 储藏室 12:30 每天 打开``），选中态仍由
+    读屏负责。只用可见文本、不重算规则；增删规则后整表重建，名称随
+    800ms 扫描同步。显示文字、tooltip、空白描述占位、焦点与鼠标路径不变。
 
 覆盖范围（核心操作链路）
 ------------------------
@@ -164,7 +183,8 @@ Qt6 的 Windows UIA 桥接（``QWindowsUia``）本身是可用的（静态编在
 → 托盘项目管理对话框（勾选框、搜索框、房间筛选）→ 托盘快捷窗口的
 设备 / 场景行按钮名称与键盘操作（设备行空格切电源、回车打开详情），以及
 小爱音频栏的切歌 / 播放 / 音量与语音条输入框 → 桌面挂件（卡片、工具钮、
-锁定解锁、折叠展开）→ 右下角语音悬浮球 → Toast / 登录状态的播报。
+锁定解锁、折叠展开）→ 右下角语音悬浮球 → 卡片副标题的外显值（主界面、
+挂件、托盘行）→ 定时任务规则开关的整条规则文本 → Toast / 登录状态的播报。
 
 验证方式
 --------
@@ -469,6 +489,30 @@ def _tray_quick_title(w: QWidget, win: QWidget) -> str:
     return "，".join(parts)
 
 
+def _tray_quick_metrics(w: QWidget, win: QWidget) -> str:
+    """托盘设备行按钮要带上的外显值原文。
+
+    行的副标题 QLabel 会按宽度省略（``_set_elided``），直接读它的
+    ``text()`` 可能只拿到「客厅 | 26…」。窗口的 ``_metrics`` 字典是
+    业务 ``set_metrics()`` 存下的未省原文，按 did 取即可与视觉同源、
+    又不会被截断。离线时业务副标题只写「房间 · 离线」，这里同样
+    不补读数；场景行没有外显值，直接返回空。
+    """
+    row = _tray_quick_row(w, win)
+    if row is None:
+        return ""
+    did = getattr(row, "_did", None)
+    if not did:
+        return ""
+    dev = next((d for d in (getattr(win, "_devices", ()) or ())
+                if getattr(d, "did", None) == did), None)
+    if dev is None or not getattr(dev, "online", True):
+        return ""
+    metrics = getattr(win, "_metrics", None) or {}
+    text = metrics.get(did) if isinstance(metrics, dict) else None
+    return str(text).strip() if text else ""
+
+
 # ---------------------------------------------------------------------------
 # 托盘快捷窗口：稳定 Tab 焦点（见模块说明第 14 条）
 # ---------------------------------------------------------------------------
@@ -771,6 +815,40 @@ def _describe_schedule_combo(w: QWidget, dialog: QWidget) -> tuple[str, str] | N
     return None
 
 
+# 定时任务规则行：开关前面依次画着四个 QLabel（设备名 / 房间与在线状态 /
+# 时间 / 动作）。通用规则只会取同一行的第一个 QLabel 当名称，于是 Tab 到
+# 开关只念「智能插座」，既分不清是哪条规则，也不知道几点执行什么动作。
+# 名称直接复用业务已经排好的可见文本，按布局顺序用空格拼接，不重算规则、
+# 不读设置、不改显示文字；离线设备的「房间 · 离线」也是业务原文。
+def _schedule_rule_row(w: QWidget, dialog: QWidget) -> QWidget | None:
+    """只认对话框自己维护的规则开关，返回它所在的那一行。
+
+    用 ``_switches`` / ``_rows`` 精确限定，避免把设置页等别处的同类开关
+    也套上规则文本。规则增删后这两个表由业务重建，扫描随之跟上。
+    """
+    switches = getattr(dialog, "_switches", None) or {}
+    rows = getattr(dialog, "_rows", None) or []
+    rule_id = next((rid for rid, sw in switches.items() if sw is w), None)
+    if rule_id is None:
+        return None
+    return next((row for row in rows
+                 if getattr(row, "_rule_id", None) == rule_id), None)
+
+
+def _describe_schedule_rule(w: QWidget,
+                            dialog: QWidget) -> tuple[str, str] | None:
+    row = _schedule_rule_row(w, dialog)
+    if row is None:
+        return None
+    parts = []
+    for label in row.findChildren(
+            QLabel, "", Qt.FindChildOption.FindDirectChildrenOnly):
+        text = " ".join(label.text().split())
+        if text:
+            parts.append(text)
+    return (" ".join(parts), "") if parts else None
+
+
 def _symbol_check(w: QWidget) -> bool:
     """是否是需要补同行文字的「+ / ✓」勾选钮。
 
@@ -997,10 +1075,15 @@ def _describe_board_card(card: QWidget) -> tuple[str, str]:
     label = _board_card_label(card)
     if type(card).__name__ != "_BoardCard":
         return label, ""
-    bits = [label, "在线" if getattr(card, "_online", True) else "离线"]
+    online = bool(getattr(card, "_online", True))
+    bits = [label, "在线" if online else "离线"]
     power = getattr(card, "_power_btn", None)
     if power is not None and power.isVisible() and power.isEnabled():
         bits.append(_power_state(power))
+    if online:
+        metrics = _card_metrics_text(card, "_sub")
+        if metrics:
+            bits.append(metrics)
     return "，".join(bits), ""
 
 
@@ -1175,6 +1258,23 @@ def _guard_enum_grid(section: QWidget) -> None:
 # 各类控件的可访问名称推导
 # ---------------------------------------------------------------------------
 
+def _card_metrics_text(w: QWidget, label_attr: str = "_sub_label") -> str:
+    """取卡片副标题里已经排好的外显值，不重算、不碰设置与写入时机。
+
+    业务 ``set_metrics()`` 把副标题写成 ``房间 | 读数``；没有读数时只有
+    房间名，离线时是 ``房间 · 离线``。这里只截 ``|`` 后面的原文，读屏
+    念到的字与明眼用户在卡片上看到的完全一致，也不需要 import 任何
+    业务模块。副标题不存在或格式变了就安静返回空串。
+    """
+    label = getattr(w, label_attr, None)
+    if not isinstance(label, QLabel):
+        return ""
+    text = label.text().strip()
+    if " | " not in text:
+        return ""
+    return text.split(" | ", 1)[1].strip()
+
+
 def _describe_power_button(w: QWidget) -> tuple[str, str]:
     title, _ = _context(w)
     prefix = f"{title}，" if title else ""
@@ -1191,12 +1291,18 @@ def _describe_device_card(w: QWidget) -> tuple[str, str]:
     room = str(getattr(device, "room_name", "") or "")
     if room:
         bits.append(room)
-    bits.append("在线" if getattr(w, "_online", getattr(device, "online", True))
-                else "离线")
+    online = bool(getattr(w, "_online", getattr(device, "online", True)))
+    bits.append("在线" if online else "离线")
     power = getattr(w, "_power_btn", None)
     can_switch = power is not None and power.isVisible() and power.isEnabled()
     if can_switch:
         bits.append(_power_state(power))
+    # 外显值写在副标题上，读屏 Tab 到自绘卡片时原本听不到；直接追加
+    # 业务已排好的读数原文，离线 / 未设置外显值时名称一字不变。
+    if online:
+        metrics = _card_metrics_text(w)
+        if metrics:
+            bits.append(metrics)
     return "，".join(bits), ""
 
 
@@ -1322,6 +1428,9 @@ def _describe(w: QWidget, *,
         combo = _describe_schedule_combo(w, schedule_dialog)
         if combo is not None:
             return combo
+        rule = _describe_schedule_rule(w, schedule_dialog)
+        if rule is not None:
+            return rule
     if audio_bar is not None:
         named = _describe_audio_control(w, audio_bar)
         if named is not None:
@@ -1344,7 +1453,9 @@ def _describe(w: QWidget, *,
         title = _tray_quick_title(w, tray_quick)
         if title:
             if cls == "PowerButton":
-                return f"{title}，电源开关，{_power_state(w)}", ""
+                metrics = _tray_quick_metrics(w, tray_quick)
+                suffix = f"，{metrics}" if metrics else ""
+                return f"{title}，电源开关，{_power_state(w)}{suffix}", ""
             if is_button and w.objectName() == "sceneRunBtn":
                 return f"{title}，执行场景", ""
     if cls == "PowerButton":

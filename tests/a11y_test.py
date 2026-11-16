@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """无障碍桥接层（app/ui/a11y.py）离屏回归测试。
 
-覆盖十件事：
+覆盖十一件事：
 1. 读屏能读到：图标按钮、设备/场景卡片、电源三态、设置开关、房间选项卡、
    状态胶囊、对话框标题都有可访问名称，且状态变化会同步。
 2. 读屏能操作：自绘卡片可聚焦，空格/回车转发到**既有**信号或方法。
@@ -31,14 +31,21 @@
    滚动条不被误伤，鼠标路径不变。
 9. 定时任务窗口不再把 tooltip 追加朗读（Qt 会把它回退成 UIA
    FullDescription）：只在该窗口内设空白描述占位，视觉 tooltip 与
-   HelpText 都不变；四个无名下拉框补上缺失的用途名。下拉框末尾的
-   「下方向」也不再读：代理接口只把 Accelerator 报空，名称、当前值、
-   描述、子节点、角色与状态全部委托给 Qt 原生接口。
+   HelpText 都不变；四个无名下拉框补上缺失的用途名；规则开关补上该行
+   四个可见标签的原文（设备名 / 房间与离线 / 时间 / 动作），在线与离线、
+   已选中与未选中都逐字断言。下拉框末尾的「下方向」也不再读：代理接口
+   只把 Accelerator 报空，名称、当前值、描述、子节点、角色与状态全部
+   委托给 Qt 原生接口。
 10. 桌面挂件与语音悬浮球也能用键盘操作：挂件卡片可 Tab 聚焦、空格切
    电源 / 回车打开详情、场景卡执行场景，卡片内动作钮退出 Tab 链；图标
    工具钮补上用途名且 tooltip 不被回退念第二遍；锁定态有纯键盘解锁入口；
    悬浮球与两个语音输入框有固定名称，收起面板后焦点回到球。普通用户的
    样式、tooltip、鼠标路径、既有信号与显示文字全部不变。
+11. 设备详情「外显值设置」挑的读数也能在 Tab 时念出来：主界面设备卡片、
+   桌面挂件卡片与托盘快捷行电源钮都复用业务已排好的副标题读数（托盘行
+   取未省略的原文），追加到可访问名称末尾；读数更新 / 清空同步、离线与
+   未设置时不补、读数变化不触发主动播报、反复扫描幂等。显示文字、QSS、
+   鼠标路径与轮询写入时机都不变。
 
 与项目其它 GUI 测试一样：离屏运行、数据目录隔离、不联网、不需要米家账号。
 
@@ -159,7 +166,7 @@ assert _power_state(probe) == "正在操作"
 probe.set_busy(False)
 probe.set_online(False)
 assert _power_state(probe) == "离线"
-print("[1/10] 电源三态与图标字形文案 OK")
+print("[1/11] 电源三态与图标字形文案 OK")
 
 
 # ---------- 2. 图标按钮：tooltip 变成可访问名称 ----------
@@ -179,7 +186,7 @@ scroll_bar = QScrollBar()
 bridge.scan()
 assert scroll_bar.accessibleName() == "", \
     f"滚动条被误命名: {scroll_bar.accessibleName()}"
-print("[2/10] 图标按钮 / 字形按钮 / 状态胶囊名称 OK")
+print("[2/11] 图标按钮 / 字形按钮 / 状态胶囊名称 OK")
 
 
 # ---------- 3. 设备卡片：名称、状态同步、焦点策略 ----------
@@ -234,7 +241,7 @@ assert "已关闭" in card.accessibleName(), card.accessibleName()
 assert "已关闭" in power.accessibleName(), power.accessibleName()
 card.set_power_state(True)
 bridge.scan()
-print("[3/10] 设备卡片名称 / 状态同步 / 焦点策略 OK")
+print("[3/11] 设备卡片名称 / 状态同步 / 焦点策略 OK")
 
 
 # ---------- 4. 零侵入：普通用户的视觉与鼠标路径逐项不变 ----------
@@ -248,7 +255,7 @@ assert ("mousePressEvent" in card.__dict__) == before["press_patched"]
 assert "mouseReleaseEvent" not in card.__dict__, \
     "桥接层给卡片打了鼠标事件猴补丁"
 assert "mousePressEvent" not in card.__dict__
-print("[4/10] 样式 / 尺寸 / 光标 / 鼠标事件零改动 OK")
+print("[4/11] 样式 / 尺寸 / 光标 / 鼠标事件零改动 OK")
 
 
 # ---------- 5. 键盘等价与鼠标路径共存 ----------
@@ -274,7 +281,7 @@ assert opened == ["d1"], f"鼠标点击打开详情的路径被破坏: {opened}"
 switched.clear()
 mouse_click(power)
 assert switched == ["d1"], f"NoFocus 后鼠标点电源钮失效: {switched}"
-print("[5/10] 键盘激活与鼠标路径（含点击电源钮）各自正常 OK")
+print("[5/11] 键盘激活与鼠标路径（含点击电源钮）各自正常 OK")
 
 
 # ---------- 6. 场景卡片与电源属性行 ----------
@@ -555,7 +562,7 @@ named_scroll.show()
 bridge.scan()
 assert not _is_plain_scroll_area(named_scroll)
 assert named_scroll.focusPolicy() == Qt.FocusPolicy.StrongFocus
-print("[6/10] 场景卡片 / 属性电源行 / 滑块键盘调节 / 无名滚动容器 OK")
+print("[6/11] 场景卡片 / 属性电源行 / 滑块键盘调节 / 无名滚动容器 OK")
 
 
 # ---------- 7. 设置开关、房间选项卡、对话框标题 ----------
@@ -753,14 +760,20 @@ import app.ui.schedule_dialog as _sched_mod  # noqa: E402
 from app.ui.a11y import _UIA_BLANK_DESCRIPTION, _schedule_dialog  # noqa: E402
 from app.ui.schedule_dialog import ScheduleDialog  # noqa: E402
 
-sched_dev = DeviceInfo(did="s1", name="大厅空调", model="demo.ac",
-                       home_name="我的家", room_name="大厅", online=True)
+# 用户实测的两条规则：一条在线设备已启用，一条离线设备未启用；设备名、
+# 房间、离线状态都在界面上看得见，读屏却只念得到设备名。
+sched_dev = DeviceInfo(did="s1", name="智能插座", model="demo.plug",
+                       home_name="我的家", room_name="储藏室", online=True)
+sched_dev_offline = DeviceInfo(did="s2", name="储藏室灯", model="demo.light",
+                               home_name="我的家", room_name="储藏室",
+                               online=False)
 sched_rules = [
-    {"id": "r1", "did": "s1", "time": "07:00", "action": "on", "enabled": True},
+    {"id": "r1", "did": "s1", "time": "12:30", "action": "on", "enabled": True},
+    {"id": "r2", "did": "s2", "time": "18:00", "action": "on", "enabled": False},
 ]
 with patch.object(_sched_mod.schedule_store, "load",
                   return_value=sched_rules):
-    sched_dlg = ScheduleDialog([sched_dev], parent=host)
+    sched_dlg = ScheduleDialog([sched_dev, sched_dev_offline], parent=host)
 bridge.scan()
 
 assert _schedule_dialog(sched_dlg._hour_combo) is sched_dlg
@@ -796,14 +809,41 @@ assert del_btn.accessibleName() == "删除这条规则", del_btn.accessibleName(
 assert del_btn.toolTip() == "删除这条规则"
 assert not del_btn.accessibleDescription().strip()
 
-# 规则开关仍可读、仍可聚焦，选中态照旧由读屏朗读
+# 规则开关：名称复用该行四个可见标签的原文，读屏念出整条规则
+# 「智能插座 储藏室 12:30 每天 打开 复选框 已选中」；离线的那条读到
+# 「储藏室灯 储藏室 · 离线 18:00 每天 打开 复选框 未选中」。
 sched_switch = sched_dlg._switches["r1"]
-assert sched_switch.accessibleName() == "大厅空调"
-assert sched_switch.focusPolicy() != Qt.FocusPolicy.NoFocus
+sched_switch2 = sched_dlg._switches["r2"]
+_sched_name1 = "智能插座 储藏室 12:30 每天 打开"
+_sched_name2 = "储藏室灯 储藏室 · 离线 18:00 每天 打开"
+assert _schedule_dialog(sched_switch) is sched_dlg
+assert sched_switch.accessibleName() == _sched_name1, \
+    sched_switch.accessibleName()
+assert sched_switch2.accessibleName() == _sched_name2, \
+    sched_switch2.accessibleName()
+assert sched_switch.isChecked() and not sched_switch2.isChecked()
+for sw in (sched_switch, sched_switch2):
+    assert sw.focusPolicy() != Qt.FocusPolicy.NoFocus
+    assert sw.toolTip() == "停用后保留规则但不执行", "视觉 tooltip 不动"
+    assert not sw.accessibleDescription().strip(), \
+        "空白占位继续挡住 FullDescription 回退"
+    # 名称只补可见文字：类型词、选中态、操作提示与帮助文案都不写
+    for noise in ("复选框", "已选中", "未选中", "按钮", "按空格", "回车",
+                  "停用后保留"):
+        assert noise not in (sw.accessibleName() or ""), \
+            (noise, sw.accessibleName())
+# 该行四个 QLabel 的原文一字未改（名称只是拼读，不另起文案）
+assert [l.text() for l in sched_dlg._rows[0].findChildren(
+    QLabel, "", Qt.FindChildOption.FindDirectChildrenOnly)] == [
+        "智能插座", "储藏室", "12:30 每天", "打开"]
 sched_switch.setChecked(False)
 bridge.scan()
-assert sched_switch.accessibleName() == "大厅空调", \
+assert sched_switch.accessibleName() == _sched_name1, \
     "checkable 开关名称不应随选中态抖动"
+# 别处的同类开关不受规则文本影响（第 7 组前面已构造设置开关）
+bridge.scan()
+assert sched_switch.accessibleName() == _sched_name1
+assert sched_switch2.accessibleName() == _sched_name2
 
 # 别处同样用 tooltip 承载说明的控件不受影响，描述仍为空
 outside = QPushButton("外部按钮")
@@ -873,7 +913,7 @@ outside_iface = QAccessible.queryAccessibleInterface(outside)
 assert not isinstance(outside_iface, _QuietComboBoxAccessible), \
     "非下拉框控件不该被代理"
 assert editable_combo.lineEdit() is not None, "可输入下拉框仍要能筛选"
-print("[7/10] 设置开关 / 勾选框 / 抽屉 / 符号按钮 / 房间默认 / 定时任务 / 下方向 OK")
+print("[7/11] 设置开关 / 勾选框 / 抽屉 / 符号按钮 / 房间默认 / 定时任务 / 下方向 OK")
 
 
 # ---------- 7e. 托盘快捷窗口：电源钮补上设备名与房间 ----------
@@ -1642,7 +1682,7 @@ bridge.scan()
 bridge.scan()
 assert card.accessibleName() == stable, "反复扫描结果应稳定（幂等）"
 assert card.focusPolicy() != Qt.FocusPolicy.NoFocus
-print("[8/10] 播报区域 / 快捷键 / 幂等性 OK")
+print("[8/11] 播报区域 / 快捷键 / 幂等性 OK")
 
 
 # ---------- 8a. Alt+1..9 切选项卡后焦点落到按钮 ----------
@@ -1757,7 +1797,7 @@ for widget in QApplication.allWidgets():
         assert not widget.autoDefault(), (
             f"{type(widget).__name__} 仍是 autoDefault，UIA 会报 Enter 快捷键")
 assert named >= 10, f"参与检查的具名控件太少: {named}"
-print("[9/10] 文案精简：无控件类型 / 选中态 / 操作提示 / HelpText OK")
+print("[9/11] 文案精简：无控件类型 / 选中态 / 操作提示 / HelpText OK")
 
 # ---------- 10. 桌面挂件 / 语音悬浮球：键盘导航与焦点停靠 ----------
 from app.core import board_store as _board_store  # noqa: E402
@@ -1950,6 +1990,86 @@ bridge.scan()
 bridge.scan()
 assert _bcard2.accessibleName() == _bname
 assert _fab._ball.accessibleName() == _fname
-print("[10/10] 桌面挂件 / 语音悬浮球：名称 / 焦点 / 键盘 / 零侵入 OK")
+print("[10/11] 桌面挂件 / 语音悬浮球：名称 / 焦点 / 键盘 / 零侵入 OK")
+
+
+# ---------- 11. 外显值随 Tab 读出（主界面 / 挂件 / 托盘行） ----------
+# 用户反馈：设备详情「外显值设置」挑的读数只画在卡片副标题上（房间 | 读数），
+# 自绘卡片的可访问名称里没有，读屏 Tab 到卡片时听不到。这里验证三处都把
+# 业务已经排好的读数原文补进名称，随读数更新 / 清空同步；显示文字、QSS、
+# 布局、鼠标事件与轮询写入时机一个字都不改。
+from app.ui.a11y import _card_metrics_text, _tray_quick_metrics  # noqa: E402
+
+_m0 = "3 18"           # 用户挑的「模式 + 目标温度」，业务拼出的裸值
+_m1 = "26.0°C 50%"     # 温湿度读数
+
+# 1) 主界面设备卡片：Tab 焦点到达时读屏念到的就是这条名称
+card.set_metrics(_m0)
+bridge.scan()
+_n0 = card.accessibleName()
+assert _m0 in _n0, _n0
+assert _n0.endswith(_m0), "外显值追加在末尾，不打断设备名 / 房间 / 状态"
+assert _card_metrics_text(card) == _m0
+card.setFocus(Qt.FocusReason.TabFocusReason)
+# 离屏环境里活动窗口可能是悬浮球，setFocus 未必成为全局 focusWidget；
+# 读屏念的是焦点控件这条名称，因此只验证名称内容不随焦点到达而变。
+assert card.accessibleName() == _n0, "焦点变化不该改写名称"
+for _noise in NOISE:
+    assert _noise not in _n0, f"外显值名称混入冗余文案「{_noise}」: {_n0}"
+assert not card.accessibleDescription()
+
+# 2) 读数更新 / 清空都同步，且不在名称变化时主动播报（只在 Tab 经过时念）
+_announced0 = bridge._last_announced
+card.set_metrics(_m1)
+bridge.scan()
+assert _m1 in card.accessibleName() and _m0 not in card.accessibleName()
+assert bridge._last_announced == _announced0, "读数变化不该主动播报刷屏"
+card.set_metrics(None)
+bridge.scan()
+_n1 = card.accessibleName()
+assert _m1 not in _n1 and " | " not in _n1
+assert _n1 == _n0.replace(f"，{_m0}", ""), _n1
+
+# 3) 离线卡片：业务副标题只有「房间 · 离线」，名称同样不补读数
+_offdev = DeviceInfo(did="off1", name="阳台灯", model="demo.light",
+                     home_name="我的家", room_name="阳台", online=False)
+_offcard = DeviceCard(_offdev)
+_offcard.set_metrics(_m1)  # 业务离线时直接 return，副标题不叠读数
+bridge.scan()
+assert "离线" in _offcard.accessibleName(), _offcard.accessibleName()
+assert _m1 not in _offcard.accessibleName(), _offcard.accessibleName()
+assert _card_metrics_text(_offcard) == ""
+
+# 4) 桌面挂件卡片：副标题同源；折叠重建后的那张卡也跟着更新
+_board.set_metrics({"bd1": _m0})
+_board._refresh_subtitles()  # 显示时业务由 showEvent 补回，这里等价触发
+bridge.scan()
+assert _m0 in _bcard2.accessibleName(), _bcard2.accessibleName()
+assert _card_metrics_text(_bcard2, "_sub") == _m0
+_board.set_metrics({})
+_board._refresh_subtitles()
+bridge.scan()
+assert _m0 not in _bcard2.accessibleName(), _bcard2.accessibleName()
+
+# 5) 托盘快捷行：副标题会被宽度省略，名称取窗口里未省略的 _metrics 原文
+_ewin.set_metrics({"e1": _m1})
+bridge.scan()
+_tbtn = _ewin._grid.itemAt(0).widget()._power_btn
+assert _tray_quick_metrics(_tbtn, _ewin) == _m1
+assert _m1 in _tbtn.accessibleName(), _tbtn.accessibleName()
+assert _tray_quick_metrics(_sbtn, _ewin) == "", "场景行没有外显值"
+assert _m1 not in _sbtn.accessibleName(), _sbtn.accessibleName()
+_ewin.set_metrics({})
+bridge.scan()
+assert _m1 not in _tbtn.accessibleName(), _tbtn.accessibleName()
+
+# 6) 反复扫描幂等
+_stable = (card.accessibleName(), _bcard2.accessibleName(),
+           _tbtn.accessibleName())
+bridge.scan()
+bridge.scan()
+assert (card.accessibleName(), _bcard2.accessibleName(),
+        _tbtn.accessibleName()) == _stable, "外显值名称应稳定不抖"
+print("[11/11] 外显值：主界面 / 挂件 / 托盘行 Tab 可读、随值同步 OK")
 
 print("\na11y_test: 全部通过（离屏、无需米家账号、未改动真实配置）")
