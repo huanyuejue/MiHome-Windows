@@ -139,15 +139,52 @@ Qt6 的 Windows UIA 桥接（``QWindowsUia``）本身是可用的（静态编在
     回车仍是「执行场景」，音频栏、标题栏、主界面卡片与其它窗口一概不受
     影响。长按回车的自动重复事件会被过滤，不会连弹出多个详情对话框。
     名称、描述、显示文字、焦点策略、忙碌守卫与鼠标路径一个字都不改。
+17. **桌面挂件与语音悬浮球补齐键盘导航**。挂件卡片是纯 ``QFrame``（业务
+    只画了背景与圆角），默认既无名也不进 Tab 链；卡片内电源钮 / 执行钮
+    反倒成了每台设备唯一的键盘入口，与主界面卡片「一台设备一个焦点」的
+    约定不一致。这里把两类挂件卡片加入 ``_ACTIVATABLE``：卡片自身成为
+    Tab 停靠点并沿用空格 / 回车语义（设备卡空格转发既有电源钮 ``click()``、
+    回车转发窗口既有的 ``open_device_requested``；场景卡两键都转发执行钮
+    ``click()``），卡内按钮退出 Tab 链但名称仍带设备 / 场景名。标题行的
+    图标工具钮由通用规则取 tooltip 补名，并在挂件 / 悬浮球范围内给
+    「名称已等于 tooltip」的按钮设空白描述，挡住 Qt 把 tooltip 回退进
+    FullDescription 后再念一遍。锁定态会隐藏整条标题栏，鼠标靠悬停浮锁
+    或右键菜单解锁，键盘因此需要一条不依赖鼠标的入口：在挂件窗口上挂
+    ``Ctrl+Shift+L``，转发到业务既有的 ``set_locked()``，不改任何像素。
+    语音悬浮球的球是无字图标钮，输入框只有逐字播放的 placeholder（打字机
+    动画每 80ms 改一次，若被 Qt 当成名称会让读屏反复播报）。给球与输入框
+    各补一个固定用途名，并把 ``collapse()`` 包一层：只要焦点在输入框上，
+    收起时（Esc / 回车提交 / 外部刷新）焦点回到球，读屏不会在面板隐藏后
+    失去停靠点。同款打字机输入框在托盘语音条里也补同一个名称。
+18. **外显值要跟着 Tab 念出来**。设备详情里「外显值设置」挑的属性读数
+    由主窗口 ``set_metrics()`` 就地写进卡片副标题（``房间 | 读数``），可
+    自绘卡片的可访问名称只由设备名 / 房间 / 在线 / 开关拼成，读屏 Tab 到
+    卡片时听不到副标题上那串值。这里直接复用**业务已经排版好的副标题**
+    （不重算、不读设置、不改写入时机），把 ``|`` 后的读数原文追加到卡片
+    名称末尾：主界面 ``DeviceCard``、桌面挂件 ``_BoardCard``、托盘快捷行
+    的设备电源钮都覆盖到；托盘行的副标题会被宽度省略，改取窗口里未省略
+    的 ``_metrics`` 原文。离线时业务本来就不显示读数，名称里也不补。
+    读数变化时名称随 800ms 扫描同步；名称里没有状态词变化，因此不会触发
+    主动播报，只有 Tab 经过时读屏才念。显示文字、QSS、布局、鼠标事件、
+    轮询与既有信号一律不变。
+19. **定时任务规则开关要念出整条规则**。规则行从左到右画着设备名、
+    房间（离线时是「房间 · 离线」）、「时刻 每天」、动作四个 ``QLabel``，
+    但通用规则只取同行第一个标签，读屏于是只念「智能插座 复选框 已选中」，
+    同一台设备配了多条规则时完全分不清。这里按对话框自有的
+    ``_switches`` / ``_rows`` 精确认出规则开关，把该行四个标签的原文按
+    布局顺序拼进名称（``智能插座 储藏室 12:30 每天 打开``），选中态仍由
+    读屏负责。只用可见文本、不重算规则；增删规则后整表重建，名称随
+    800ms 扫描同步。显示文字、tooltip、空白描述占位、焦点与鼠标路径不变。
 
-覆盖范围（首轮：核心操作链路）
-------------------------------
+覆盖范围（核心操作链路）
+------------------------
 扫码登录窗口 → 家庭/房间切换 → 设备卡片（开关、打开详情）→ 场景卡片 →
 设备详情工作台（电源行、滑块、枚举、只读值）→ 设置页开关 → 顶栏与状态胶囊
 → 托盘项目管理对话框（勾选框、搜索框、房间筛选）→ 托盘快捷窗口的
 设备 / 场景行按钮名称与键盘操作（设备行空格切电源、回车打开详情），以及
-小爱音频栏的切歌 / 播放 / 音量 → Toast / 登录状态的播报。
-桌面挂件的完整键盘导航留待后续迭代。
+小爱音频栏的切歌 / 播放 / 音量与语音条输入框 → 桌面挂件（卡片、工具钮、
+锁定解锁、折叠展开）→ 右下角语音悬浮球 → 卡片副标题的外显值（主界面、
+挂件、托盘行）→ 定时任务规则开关的整条规则文本 → Toast / 登录状态的播报。
 
 验证方式
 --------
@@ -222,11 +259,15 @@ _WINDOW_TITLES = {
     "UpdateDialog": "发现新版本",
 }
 
-# 这些自绘容器需要：可聚焦 + 键盘激活。它们是纯 QWidget，Qt 默认 NoFocus。
+# 这些自绘容器需要：可聚焦 + 键盘激活。它们是纯 QWidget / QFrame，Qt 默认
+# NoFocus。桌面挂件的 _BoardCard / _SceneCard 同构（QFrame + 自绘背景），
+# 一并纳入后，卡片内的动作按钮也会按 _is_redundant_action_button 退出 Tab 链。
 _ACTIVATABLE = {
     "DeviceCard",
     "SceneCard",
     "PowerRowSection",
+    "_BoardCard",
+    "_SceneCard",
 }
 
 # 环境状态胶囊：只有图标 + tooltip，数值写在 text() 里，两者都要读出来。
@@ -255,6 +296,7 @@ _STATEFUL = {
     "DeviceCard",
     "PowerRowSection",
     "StatusPillSection",
+    "_BoardCard",
 }
 
 _PUA_START = 0xE000
@@ -445,6 +487,30 @@ def _tray_quick_title(w: QWidget, win: QWidget) -> str:
         if raw and raw not in parts:
             parts.append(raw)
     return "，".join(parts)
+
+
+def _tray_quick_metrics(w: QWidget, win: QWidget) -> str:
+    """托盘设备行按钮要带上的外显值原文。
+
+    行的副标题 QLabel 会按宽度省略（``_set_elided``），直接读它的
+    ``text()`` 可能只拿到「客厅 | 26…」。窗口的 ``_metrics`` 字典是
+    业务 ``set_metrics()`` 存下的未省原文，按 did 取即可与视觉同源、
+    又不会被截断。离线时业务副标题只写「房间 · 离线」，这里同样
+    不补读数；场景行没有外显值，直接返回空。
+    """
+    row = _tray_quick_row(w, win)
+    if row is None:
+        return ""
+    did = getattr(row, "_did", None)
+    if not did:
+        return ""
+    dev = next((d for d in (getattr(win, "_devices", ()) or ())
+                if getattr(d, "did", None) == did), None)
+    if dev is None or not getattr(dev, "online", True):
+        return ""
+    metrics = getattr(win, "_metrics", None) or {}
+    text = metrics.get(did) if isinstance(metrics, dict) else None
+    return str(text).strip() if text else ""
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +815,40 @@ def _describe_schedule_combo(w: QWidget, dialog: QWidget) -> tuple[str, str] | N
     return None
 
 
+# 定时任务规则行：开关前面依次画着四个 QLabel（设备名 / 房间与在线状态 /
+# 时间 / 动作）。通用规则只会取同一行的第一个 QLabel 当名称，于是 Tab 到
+# 开关只念「智能插座」，既分不清是哪条规则，也不知道几点执行什么动作。
+# 名称直接复用业务已经排好的可见文本，按布局顺序用空格拼接，不重算规则、
+# 不读设置、不改显示文字；离线设备的「房间 · 离线」也是业务原文。
+def _schedule_rule_row(w: QWidget, dialog: QWidget) -> QWidget | None:
+    """只认对话框自己维护的规则开关，返回它所在的那一行。
+
+    用 ``_switches`` / ``_rows`` 精确限定，避免把设置页等别处的同类开关
+    也套上规则文本。规则增删后这两个表由业务重建，扫描随之跟上。
+    """
+    switches = getattr(dialog, "_switches", None) or {}
+    rows = getattr(dialog, "_rows", None) or []
+    rule_id = next((rid for rid, sw in switches.items() if sw is w), None)
+    if rule_id is None:
+        return None
+    return next((row for row in rows
+                 if getattr(row, "_rule_id", None) == rule_id), None)
+
+
+def _describe_schedule_rule(w: QWidget,
+                            dialog: QWidget) -> tuple[str, str] | None:
+    row = _schedule_rule_row(w, dialog)
+    if row is None:
+        return None
+    parts = []
+    for label in row.findChildren(
+            QLabel, "", Qt.FindChildOption.FindDirectChildrenOnly):
+        text = " ".join(label.text().split())
+        if text:
+            parts.append(text)
+    return (" ".join(parts), "") if parts else None
+
+
 def _symbol_check(w: QWidget) -> bool:
     """是否是需要补同行文字的「+ / ✓」勾选钮。
 
@@ -898,8 +998,9 @@ def _is_redundant_action_button(w: QWidget) -> bool:
     """是否是「已可聚焦卡片」内部、键盘功能与卡片重复的动作按钮。
 
     只认两类：设备卡片 / 电源属性行里的 PowerButton，以及场景卡片里的
-    运行按钮（objectName=sceneRunBtn）。托盘快捷行、桌面挂件里的电源钮
-    没有可聚焦的父卡片，是当地唯一的键盘入口，必须原样保留。
+    运行按钮（objectName=sceneRunBtn）。桌面挂件卡片现在也进了
+    _ACTIVATABLE，同样在这里收敛成「一台设备一个焦点」；托盘快捷行没有
+    可聚焦的父卡片，电源钮仍是当地唯一的键盘入口，必须原样保留。
     """
     if _keyboard_owner(w) is None:
         return False
@@ -907,6 +1008,144 @@ def _is_redundant_action_button(w: QWidget) -> bool:
         return True
     return (isinstance(w, QAbstractButton)
             and w.objectName() == "sceneRunBtn")
+
+
+# ---------------------------------------------------------------------------
+# 桌面挂件 / 语音悬浮球：按类名 + 鸭子属性识别，不 import 业务模块
+# ---------------------------------------------------------------------------
+
+def _board_card_of(w: QWidget) -> QWidget | None:
+    """沿父链（含自身）找桌面挂件卡片 _BoardCard / _SceneCard。"""
+    node: QWidget | None = w
+    for _ in range(4):
+        if node is None:
+            return None
+        if type(node).__name__ in ("_BoardCard", "_SceneCard"):
+            return node
+        node = node.parentWidget()
+    return None
+
+
+def _board_window(w: QWidget) -> QWidget | None:
+    """沿父链（含自身）找 WidgetsBoard 窗口；标题栏工具钮也命中。"""
+    node: QWidget | None = w
+    for _ in range(6):
+        if node is None:
+            return None
+        if type(node).__name__ == "WidgetsBoard":
+            return node
+        node = node.parentWidget()
+    return None
+
+
+def _voice_fab_of(w: QWidget) -> QWidget | None:
+    """沿父链（含自身）找 VoiceFab；只认同时带球与输入框的那个容器。"""
+    node: QWidget | None = w
+    for _ in range(4):
+        if node is None:
+            return None
+        if (type(node).__name__ == "VoiceFab"
+                and getattr(node, "_ball", None) is not None
+                and getattr(node, "_edit", None) is not None):
+            return node
+        node = node.parentWidget()
+    return None
+
+
+def _board_card_label(card: QWidget) -> str:
+    """挂件卡片所属对象的「名字，房间 / 家庭」，供卡片与内嵌按钮共用。"""
+    if type(card).__name__ == "_BoardCard":
+        dev = getattr(card, "_device", None)
+        bits = [str(getattr(dev, "name", "") or "未命名设备")]
+        room = str(getattr(dev, "room_name", "") or "")
+        if room:
+            bits.append(room)
+        return "，".join(bits)
+    scene = getattr(card, "_scene", None)
+    if isinstance(scene, dict):
+        name = str(scene.get("name") or "未命名场景")
+        home = str(scene.get("home_name") or "")
+    else:
+        name = str(getattr(scene, "name", "") or "未命名场景")
+        home = str(getattr(scene, "home_name", "") or "")
+    return "，".join([name] + ([home] if home else []))
+
+
+def _describe_board_card(card: QWidget) -> tuple[str, str]:
+    label = _board_card_label(card)
+    if type(card).__name__ != "_BoardCard":
+        return label, ""
+    online = bool(getattr(card, "_online", True))
+    bits = [label, "在线" if online else "离线"]
+    power = getattr(card, "_power_btn", None)
+    if power is not None and power.isVisible() and power.isEnabled():
+        bits.append(_power_state(power))
+    if online:
+        metrics = _card_metrics_text(card, "_sub")
+        if metrics:
+            bits.append(metrics)
+    return "，".join(bits), ""
+
+
+def _describe_board_child(w: QWidget, card: QWidget) -> tuple[str, str] | None:
+    """卡片自身 / 卡内按钮的名称；None 表示交回通用推导。"""
+    if w is card:
+        return _describe_board_card(card)
+    label = _board_card_label(card)
+    if type(w).__name__ == "PowerButton":
+        return f"{label}，电源开关，{_power_state(w)}", ""
+    if isinstance(w, QAbstractButton) and w.objectName() == "sceneRunBtn":
+        return f"{label}，执行场景", ""
+    return None
+
+
+def _guard_voice_fab(fab: QWidget) -> None:
+    """收起语音面板时把焦点还给悬浮球，不让读屏在隐藏后失去停靠点。
+
+    业务 collapse() 有四个调用方（Esc、回车提交、再次点球、外部刷新隐藏），
+    包住这一个入口即可全覆盖。只在「焦点确实在输入框上」时回球：用户已经
+    Tab 走开后再收起，焦点保持原样。球不可见（整个悬浮球被隐藏）时不抢焦点。
+    """
+    if getattr(fab, "_a11y_collapse_original", None) is not None:
+        return
+    original = getattr(fab, "collapse", None)
+    if not callable(original):
+        return
+    fab._a11y_collapse_original = original
+
+    def collapse_guarded(_f=fab, _o=original):
+        edit = getattr(_f, "_edit", None)
+        ball = getattr(_f, "_ball", None)
+        restore = (edit is not None and ball is not None
+                   and edit.hasFocus() and ball.isVisible())
+        result = _o()
+        if restore:
+            _safe_focus(ball)
+        return result
+
+    fab.collapse = collapse_guarded
+
+
+def _guard_board_lock_shortcut(board: QWidget) -> None:
+    """锁定后标题栏整条隐藏，键盘用户没有解锁入口。
+
+    鼠标用户有悬停浮锁与右键菜单；这里只在挂件窗口上补一个快捷键，转发到
+    业务既有的 set_locked()，不改任何控件、像素、菜单与既有交互。
+    """
+    if getattr(board, "_a11y_lock_shortcut", None) is not None:
+        return
+    try:
+        shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), board)
+
+        def toggle(_b=board):
+            was_locked = bool(_b.is_locked())
+            _b.set_locked(not was_locked)
+            announce_static("挂件已解锁" if was_locked else "挂件已锁定")
+
+        shortcut.activated.connect(toggle)
+        board._a11y_lock_shortcut = shortcut
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1258,23 @@ def _guard_enum_grid(section: QWidget) -> None:
 # 各类控件的可访问名称推导
 # ---------------------------------------------------------------------------
 
+def _card_metrics_text(w: QWidget, label_attr: str = "_sub_label") -> str:
+    """取卡片副标题里已经排好的外显值，不重算、不碰设置与写入时机。
+
+    业务 ``set_metrics()`` 把副标题写成 ``房间 | 读数``；没有读数时只有
+    房间名，离线时是 ``房间 · 离线``。这里只截 ``|`` 后面的原文，读屏
+    念到的字与明眼用户在卡片上看到的完全一致，也不需要 import 任何
+    业务模块。副标题不存在或格式变了就安静返回空串。
+    """
+    label = getattr(w, label_attr, None)
+    if not isinstance(label, QLabel):
+        return ""
+    text = label.text().strip()
+    if " | " not in text:
+        return ""
+    return text.split(" | ", 1)[1].strip()
+
+
 def _describe_power_button(w: QWidget) -> tuple[str, str]:
     title, _ = _context(w)
     prefix = f"{title}，" if title else ""
@@ -1035,12 +1291,18 @@ def _describe_device_card(w: QWidget) -> tuple[str, str]:
     room = str(getattr(device, "room_name", "") or "")
     if room:
         bits.append(room)
-    bits.append("在线" if getattr(w, "_online", getattr(device, "online", True))
-                else "离线")
+    online = bool(getattr(w, "_online", getattr(device, "online", True)))
+    bits.append("在线" if online else "离线")
     power = getattr(w, "_power_btn", None)
     can_switch = power is not None and power.isVisible() and power.isEnabled()
     if can_switch:
         bits.append(_power_state(power))
+    # 外显值写在副标题上，读屏 Tab 到自绘卡片时原本听不到；直接追加
+    # 业务已排好的读数原文，离线 / 未设置外显值时名称一字不变。
+    if online:
+        metrics = _card_metrics_text(w)
+        if metrics:
+            bits.append(metrics)
     return "，".join(bits), ""
 
 
@@ -1132,7 +1394,9 @@ def _describe(w: QWidget, *,
               module_card: QWidget | None = None,
               room_row: QWidget | None = None,
               slider_owner: QWidget | None = None,
-              audio_bar: QWidget | None = None) -> tuple[str | None, str | None]:
+              audio_bar: QWidget | None = None,
+              board_card: QWidget | None = None,
+              voice_fab: QWidget | None = None) -> tuple[str | None, str | None]:
     """返回 (可访问名称, 可访问描述)；名称 None 表示保持原样。
 
     描述恒为空：读屏会朗读 HelpText，写帮助文案只会产生拖尾。
@@ -1142,6 +1406,19 @@ def _describe(w: QWidget, *,
     text = w.text().strip() if is_button else ""
 
     # --- 业务专有控件 -----------------------------------------------------
+    # 桌面挂件卡片与卡内按钮：名称带设备 / 场景名，卡片状态随电源翻转
+    if board_card is not None:
+        named = _describe_board_child(w, board_card)
+        if named is not None:
+            return named
+    # 语音悬浮球：球是无字图标钮，名称沿用业务 tooltip 原文
+    # 「小爱同学 · 自然语言控制」，不另起简称；输入框只有逐字播放的
+    # placeholder，若让 Qt 拿它当名称，读屏会跟着打字机动画每 80ms 播报一次。
+    if voice_fab is not None:
+        if getattr(voice_fab, "_ball", None) is w:
+            return w.toolTip().strip() or "小爱同学", ""
+        if getattr(voice_fab, "_edit", None) is w:
+            return "语音指令", ""
     # 「添加功能」抽屉：每项唯一的符号按钮必须带功能标题与当前动作
     if module_card is not None:
         return _describe_module_button(w, module_card)
@@ -1151,6 +1428,9 @@ def _describe(w: QWidget, *,
         combo = _describe_schedule_combo(w, schedule_dialog)
         if combo is not None:
             return combo
+        rule = _describe_schedule_rule(w, schedule_dialog)
+        if rule is not None:
+            return rule
     if audio_bar is not None:
         named = _describe_audio_control(w, audio_bar)
         if named is not None:
@@ -1166,10 +1446,16 @@ def _describe(w: QWidget, *,
     # 托盘快捷窗口：电源钮 / 场景执行钮要带上所属对象，否则整页同名。
     # 只命中该窗口；其它页面的电源钮仍走 _describe_power_button 原路径。
     if tray_quick is not None:
+        # 语音条同样只有打字机 placeholder 没有固定名称，与悬浮球输入框
+        # 用同一个用途名；逐字动画不再干扰读屏。
+        if isinstance(w, QLineEdit) and getattr(tray_quick, "_voice_edit", None) is w:
+            return "语音指令", ""
         title = _tray_quick_title(w, tray_quick)
         if title:
             if cls == "PowerButton":
-                return f"{title}，电源开关，{_power_state(w)}", ""
+                metrics = _tray_quick_metrics(w, tray_quick)
+                suffix = f"，{metrics}" if metrics else ""
+                return f"{title}，电源开关，{_power_state(w)}{suffix}", ""
             if is_button and w.objectName() == "sceneRunBtn":
                 return f"{title}，执行场景", ""
     if cls == "PowerButton":
@@ -1245,6 +1531,10 @@ def _semantic_key(w: QWidget) -> tuple[str, str] | None:
     if cls == "SceneCard":
         scene = getattr(w, "scene", None)
         return ("scene", str(getattr(scene, "scene_id", ""))) if scene else None
+    if cls == "_BoardCard":
+        return ("board-card", str(getattr(w, "_did", "")))
+    if cls == "_SceneCard":
+        return ("board-scene", str(getattr(w, "_sid", "")))
     if cls == "SiToggleButtonRefactor":
         return ("tab", w.text().strip())
     # 托盘快捷行没有可聚焦的父卡片，按钮本身就是当地唯一的键盘入口；
@@ -1550,6 +1840,24 @@ class AccessibilityBridge(QObject):
                 # 走按钮的 click()，与鼠标点击右侧运行钮完全同一条路径
                 w._run_btn.click()
                 return True
+            if cls == "_BoardCard":
+                # 挂件卡片：空格转发卡内电源钮既有的 clicked，回车转发
+                # 窗口既有的 open_device_requested（鼠标点卡片空白区走的就是它）。
+                if key == Qt.Key.Key_Space:
+                    power = getattr(w, "_power_btn", None)
+                    if power is None or not power.isVisible() or not power.isEnabled():
+                        announce_static("该设备不支持在此切换电源")
+                        return True
+                    power.click()
+                else:
+                    board = getattr(w, "_board", None)
+                    if board is None:
+                        return False
+                    board.open_device_requested.emit(w._did)
+                return True
+            if cls == "_SceneCard":
+                w._run_btn.click()
+                return True
             if cls == "PowerRowSection":
                 w._toggle()
                 return True
@@ -1698,6 +2006,9 @@ class AccessibilityBridge(QObject):
         cls = type(w).__name__
         tray_quick = _tray_quick_window(w)
         audio_bar = _audio_bar(w)
+        board_card = _board_card_of(w)
+        voice_fab = _voice_fab_of(w)
+        board_window = _board_window(w)
 
         # 0) 已从网格摘除、只等 deleteLater() 的旧行，删除前仍 visible 且
         #    可聚焦，Tab 链里会多出一整套同名按钮。整行（含子控件）退出
@@ -1726,6 +2037,8 @@ class AccessibilityBridge(QObject):
             room_row=_room_default_row(w),
             slider_owner=slider_owner,
             audio_bar=audio_bar,
+            board_card=board_card,
+            voice_fab=voice_fab,
         )
         if name:
             if w.accessibleName() != name:
@@ -1750,6 +2063,17 @@ class AccessibilityBridge(QObject):
         if schedule_dialog is not None:
             try:
                 if (w.toolTip().strip()
+                        and w.accessibleDescription() != _UIA_BLANK_DESCRIPTION):
+                    w.setAccessibleDescription(_UIA_BLANK_DESCRIPTION)
+            except Exception:
+                pass
+        # 桌面挂件 / 语音悬浮球里所有图标按钮的名称都取自 tooltip（或已包含
+        # tooltip 的用途），同样要挡住回退，否则读屏把「锁定 / 执行场景 /
+        # 小爱同学 · 自然语言控制」念两遍。toolTip() 一个字不改，自绘悬停
+        # 提示照旧；只命中这两个范围，其它窗口的 HelpText 保持原样。
+        if board_window is not None or voice_fab is not None:
+            try:
+                if (isinstance(w, QAbstractButton) and w.toolTip().strip()
                         and w.accessibleDescription() != _UIA_BLANK_DESCRIPTION):
                     w.setAccessibleDescription(_UIA_BLANK_DESCRIPTION)
             except Exception:
@@ -1845,6 +2169,24 @@ class AccessibilityBridge(QObject):
         if _is_plain_scroll_area(w):
             if w.focusPolicy() != Qt.FocusPolicy.NoFocus:
                 w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        # 3g) 语音悬浮球与桌面挂件窗口级适配：collapse 时把焦点还给球、
+        #     球 / 输入框确保可聚焦；锁定态补一条纯键盘解锁入口。
+        if cls == "VoiceFab":
+            try:
+                _guard_voice_fab(w)
+                for part in (getattr(w, "_ball", None),
+                             getattr(w, "_edit", None)):
+                    if (part is not None
+                            and part.focusPolicy() == Qt.FocusPolicy.NoFocus):
+                        part.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            except Exception:
+                pass
+        if cls == "WidgetsBoard":
+            try:
+                _guard_board_lock_shortcut(w)
+            except Exception:
+                pass
 
         # 4) 无边框遮罩对话框补窗口标题（不改变任何像素）
         if isinstance(w, QDialog) and not w.windowTitle():
@@ -2022,14 +2364,25 @@ class AccessibilityBridge(QObject):
 
         bind("Ctrl+L", focus_first_card)
 
-        # Alt+1..9：直接切到第 N 个房间 / 场景选项卡
+        # Alt+1..9：直接切到第 N 个房间 / 场景选项卡。
+        # 只 click() 不会移动焦点，读屏不播报切换结果；再把焦点交给已经
+        # 选中的选项卡按钮，效果与 Tab 走过去完全一致（念「场景 复选框
+        # 已选中」）。鼠标点选项卡仍走业务原路径，一点不变。
+        # 房间不足 9 个时，多出来的数字键完全静默（用户明确不要「没有第
+        # N 个房间」这类提示）：焦点、选中项与播报区域一律不动。
         for index in range(1, 10):
             def switch_tab(n=index) -> None:
                 buttons = list(getattr(window, "_tab_buttons", {}).values())
-                if 0 < n <= len(buttons):
-                    buttons[n - 1].click()
-                else:
-                    announce_static(f"没有第 {n} 个房间")
+                if not (0 < n <= len(buttons)):
+                    return
+                btn = buttons[n - 1]
+                # 快捷键已经指定去处，撤销旧设备卡片的 Tab 焦点托管，免得
+                # 网格重建后焦点被抢回旧卡片、读屏念错对象。
+                self._kb_focus_key = None
+                btn.click()
+                # 延后一轮：等业务同步 checked、网格重建结束再聚焦，读屏
+                # 只念一次「已选中」，不会先念旧状态再念新状态。
+                QTimer.singleShot(0, lambda target=btn: _safe_focus(target))
 
             bind(f"Alt+{index}", switch_tab)
 
